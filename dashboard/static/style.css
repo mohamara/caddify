@@ -227,7 +227,7 @@ input:focus, select:focus {
 }
 .add-form {
   display: grid;
-  grid-template-columns: 1.2fr 0.55fr 0.8fr 1fr auto;
+  grid-template-columns: 1.1fr 0.5fr 0.7fr 0.9fr 0.85fr auto;
   gap: 12px;
   align-items: end;
 }
@@ -277,6 +277,26 @@ input:focus, select:focus {
   background: #e8f0ff;
   border-color: #b8c9ef;
   color: #264a8a;
+}
+.tag.log-info {
+  background: var(--ok-bg);
+  border-color: #b7e4cf;
+  color: var(--ok);
+}
+.tag.log-debug {
+  background: #eef0ff;
+  border-color: #c5c9ef;
+  color: #3a3f8a;
+}
+.tag.log-warn {
+  background: var(--warn-bg);
+  border-color: #efd79a;
+  color: var(--warn);
+}
+.tag.log-error {
+  background: var(--err-bg);
+  border-color: #f0c4c4;
+  color: var(--err);
 }
 .tag.off {
   background: #eef1ef;
@@ -384,8 +404,8 @@ th {
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--shadow);
-  min-width: 360px;
-  max-width: min(420px, 92vw);
+  min-width: 400px;
+  max-width: min(480px, 92vw);
 }
 .edit-form input[type="number"],
 .edit-form input[type="text"],

@@ -8,7 +8,7 @@
   "language": "Язык",
   "default_password_warn": "Пароль по умолчанию всё ещё {password} — измените DASHBOARD_PASSWORD в .env.",
   "routes_heading": "Маршруты",
-  "routes_intro": "Привяжите каждый домен к порту. Авто SSL, ручной сертификат или только HTTP.",
+  "routes_intro": "Привяжите домен к порту. SSL и уровень access-лога — отдельно для каждого домена.",
   "stat_routes": "Маршруты",
   "stat_acme": "Email ACME",
   "add_domain": "Добавить домен",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "(необязательная замена)",
   "err_manual_certs_required": "Для ручного SSL нужны файлы сертификата и ключа",
   "err_manual_certs_missing": "Ручные сертификаты для {domain} не найдены — загрузите fullchain.pem и privkey.pem",
-  "mode_ssl_manual": "с ручным SSL"
+  "mode_ssl_manual": "с ручным SSL",
+  "col_log": "Лог",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "Выкл"
 }

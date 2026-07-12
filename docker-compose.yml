@@ -12,6 +12,7 @@ services:
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
+      - ./logs/caddy:/var/log/caddy
       - caddy_data:/data
       - caddy_config:/config
     extra_hosts:
@@ -25,6 +26,8 @@ services:
       - "${DASHBOARD_PORT:-9090}:9090"
     environment:
       DATA_DIR: /data
+      LOGS_DIR: /data/logs/app
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-changeme}
       DASHBOARD_SECRET: ${DASHBOARD_SECRET:-change-this-secret}
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
@@ -33,10 +36,33 @@ services:
       - ./routes.conf:/data/routes.conf
       - ./caddy:/data/caddy
       - ./certs:/data/certs
+      - ./logs:/data/logs
       - ./.env:/data/.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - caddy
+
+  log-shipper:
+    build: ./logship
+    container_name: caddify-logship
+    restart: unless-stopped
+    environment:
+      LOGS_ROOT: /logs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_S3_ENABLED: ${LOG_S3_ENABLED:-0}
+      LOG_S3_ENDPOINT: ${LOG_S3_ENDPOINT:-}
+      LOG_S3_BUCKET: ${LOG_S3_BUCKET:-}
+      LOG_S3_ACCESS_KEY: ${LOG_S3_ACCESS_KEY:-}
+      LOG_S3_SECRET_KEY: ${LOG_S3_SECRET_KEY:-}
+      LOG_S3_REGION: ${LOG_S3_REGION:-us-east-1}
+      LOG_S3_PREFIX: ${LOG_S3_PREFIX:-caddify/logs}
+      LOG_S3_INTERVAL: ${LOG_S3_INTERVAL:-3600}
+      LOG_S3_KEEP_LOCAL: ${LOG_S3_KEEP_LOCAL:-1}
+    volumes:
+      - ./logs:/logs
+    depends_on:
+      - caddy
+      - dashboard
 
 volumes:
   caddy_data:

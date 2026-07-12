@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import secrets
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 from starlette.middleware.sessions import SessionMiddleware
 
 from i18n import get_lang, make_t, set_lang_cookie, supported, template_ctx, translate
+from logging_config import audit, caddy_log_level, get_logger, setup_logging
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 ROUTES_FILE = DATA_DIR / "routes.conf"
@@ -27,6 +29,7 @@ CADDY_CONTAINER = os.environ.get("CADDY_CONTAINER", "caddify")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme")
 SECRET_KEY = os.environ.get("DASHBOARD_SECRET", secrets.token_hex(32))
 CERTS_CONTAINER = "/certs"
+CADDY_LOG_DIR = "/var/log/caddy"
 
 DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$")
 DEFAULT_HOST = "host.docker.internal"
@@ -34,6 +37,48 @@ SSL_OFF_TOKENS = {"nossl", "http", "no-ssl", "ssl=false", "ssl=0", "false", "off
 SSL_ON_TOKENS = {"ssl", "https", "ssl=true", "ssl=1", "true", "auto"}
 SSL_MANUAL_TOKENS = {"manual", "custom", "cert", "tls-manual"}
 SSL_MODES = {"auto", "off", "manual"}
+LOG_LEVELS = ("off", "debug", "info", "warn", "error")
+DEFAULT_LOG_LEVEL = "info"
+
+log = get_logger("caddify.dashboard")
+
+
+def parse_log_level(value: str | None) -> str:
+    if value is None or not str(value).strip():
+        return DEFAULT_LOG_LEVEL
+    low = value.strip().lower()
+    if low in {"warning", "warn"}:
+        return "warn"
+    if low in LOG_LEVELS:
+        return low
+    return DEFAULT_LOG_LEVEL
+
+
+def caddy_access_level(log_level: str) -> str:
+    return {
+        "debug": "DEBUG",
+        "info": "INFO",
+        "warn": "WARN",
+        "error": "ERROR",
+    }.get(log_level, "INFO")
+
+
+def _access_log_snippet(domain: str, log_level: str) -> list[str]:
+    """Per-domain access log; empty when log_level is off."""
+    if log_level == "off":
+        return []
+    safe = domain.replace("/", "_")
+    level = caddy_access_level(log_level)
+    return [
+        "\tlog {",
+        f"\t\toutput file {CADDY_LOG_DIR}/access/{safe}.log {{",
+        "\t\t\troll_size 50mb",
+        "\t\t\troll_keep 10",
+        "\t\t}",
+        "\t\tformat json",
+        f"\t\tlevel {level}",
+        "\t}",
+    ]
 
 
 def normalize_host(host: str) -> str:
@@ -117,7 +162,8 @@ def ensure_routes_file() -> None:
     ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ROUTES_FILE.exists():
         ROUTES_FILE.write_text(
-            "# domain  port  [host]  [ssl|nossl|manual]\n# managed by caddify dashboard\n",
+            "# domain  port  [host]  [ssl|nossl|manual]  [log=off|debug|info|warn|error]\n"
+            "# managed by caddify dashboard\n",
             encoding="utf-8",
         )
 
@@ -135,6 +181,15 @@ def read_acme_email() -> str:
     return os.environ.get("ACME_EMAIL", "admin@example.com")
 
 
+def _parse_log_token(token: str) -> str | None:
+    low = token.lower()
+    if low in {"nolog", "log=off", "log=false", "log=0", "log=no"}:
+        return "off"
+    if low.startswith("log="):
+        return parse_log_level(low.split("=", 1)[1])
+    return None
+
+
 def list_routes() -> list[dict[str, Any]]:
     ensure_routes_file()
     routes: list[dict[str, Any]] = []
@@ -148,9 +203,13 @@ def list_routes() -> list[dict[str, Any]]:
         domain, port = parts[0], parts[1]
         host = DEFAULT_HOST
         ssl_mode = "auto"
+        log_level = DEFAULT_LOG_LEVEL
         for token in parts[2:]:
             low = token.lower()
-            if low in SSL_OFF_TOKENS:
+            parsed_log = _parse_log_token(token)
+            if parsed_log is not None:
+                log_level = parsed_log
+            elif low in SSL_OFF_TOKENS:
                 ssl_mode = "off"
             elif low in SSL_MANUAL_TOKENS:
                 ssl_mode = "manual"
@@ -165,6 +224,7 @@ def list_routes() -> list[dict[str, Any]]:
                 "host": host,
                 "ssl_mode": ssl_mode,
                 "ssl": ssl_mode != "off",
+                "log_level": log_level,
                 "has_certs": has_manual_certs(domain),
             }
         )
@@ -174,6 +234,7 @@ def list_routes() -> list[dict[str, Any]]:
 def format_route_line(route: dict[str, Any]) -> str:
     host = route.get("host") or DEFAULT_HOST
     mode = route.get("ssl_mode") or ("auto" if route.get("ssl", True) else "off")
+    log_level = parse_log_level(route.get("log_level"))
     parts = [route["domain"], str(route["port"])]
     if host != DEFAULT_HOST:
         parts.append(host)
@@ -181,6 +242,8 @@ def format_route_line(route: dict[str, Any]) -> str:
         parts.append("nossl")
     elif mode == "manual":
         parts.append("manual")
+    if log_level != DEFAULT_LOG_LEVEL:
+        parts.append(f"log={log_level}")
     return "  ".join(parts)
 
 
@@ -188,7 +251,7 @@ def write_routes(routes: list[dict[str, Any]]) -> None:
     ensure_routes_file()
     lines = [
         "# managed by caddify dashboard / CLI",
-        "# domain  port  [host]  [ssl|nossl|manual]",
+        "# domain  port  [host]  [ssl|nossl|manual]  [log=off|debug|info|warn|error]",
         "",
     ]
     for r in routes:
@@ -201,10 +264,25 @@ def generate_caddyfile(routes: list[dict[str, Any]], lang: str = "en") -> None:
     email = read_acme_email()
     CADDYFILE.parent.mkdir(parents=True, exist_ok=True)
     ensure_certs_dir()
-    chunks = ["{", f"\temail {email}", "}", ""]
+    level = caddy_log_level()
+    chunks = [
+        "{",
+        f"\temail {email}",
+        "\tlog {",
+        f"\t\toutput file {CADDY_LOG_DIR}/error.log {{",
+        "\t\t\troll_size 20mb",
+        "\t\t\troll_keep 5",
+        "\t\t}",
+        "\t\tformat json",
+        f"\t\tlevel {level}",
+        "\t}",
+        "}",
+        "",
+    ]
     if not routes:
         chunks += [
             ":80 {",
+            *_access_log_snippet("_default", DEFAULT_LOG_LEVEL),
             '\trespond "caddify ready — open the dashboard to add domains" 200',
             "}",
             "",
@@ -213,9 +291,12 @@ def generate_caddyfile(routes: list[dict[str, Any]], lang: str = "en") -> None:
         for r in routes:
             host = r.get("host") or DEFAULT_HOST
             mode = r.get("ssl_mode") or ("auto" if r.get("ssl", True) else "off")
+            log_level = parse_log_level(r.get("log_level"))
+            access = _access_log_snippet(r["domain"], log_level)
             if mode == "off":
                 site_lines = [
                     f"http://{r['domain']} {{",
+                    *access,
                     f"\treverse_proxy {host}:{r['port']}",
                     "}",
                 ]
@@ -229,17 +310,20 @@ def generate_caddyfile(routes: list[dict[str, Any]], lang: str = "en") -> None:
                 site_lines = [
                     f"{r['domain']} {{",
                     f"\ttls {c_path} {k_path}",
+                    *access,
                     f"\treverse_proxy {host}:{r['port']}",
                     "}",
                 ]
             else:
                 site_lines = [
                     f"{r['domain']} {{",
+                    *access,
                     f"\treverse_proxy {host}:{r['port']}",
                     "}",
                 ]
             chunks += site_lines + [""]
     CADDYFILE.write_text("\n".join(chunks), encoding="utf-8")
+    log.debug("caddyfile generated", extra={"layer": "app", "event": "caddyfile_write"})
 
 
 def reload_caddy(lang: str = "en") -> tuple[bool, str]:
@@ -349,9 +433,12 @@ def login_page(request: Request) -> Any:
 
 @app.post("/login")
 def login_submit(request: Request, password: str = Form(...)) -> Any:
+    client = request.client.host if request.client else None
     if secrets.compare_digest(password, DASHBOARD_PASSWORD):
         request.session["auth"] = True
+        audit("login_ok", client=client)
         return RedirectResponse("/", status_code=303)
+    audit("login_fail", level=logging.WARNING, client=client)
     return render(
         request,
         "login.html",
@@ -362,6 +449,8 @@ def login_submit(request: Request, password: str = Form(...)) -> Any:
 
 @app.post("/logout")
 def logout(request: Request) -> Any:
+    client = request.client.host if request.client else None
+    audit("logout", client=client)
     request.session.clear()
     return RedirectResponse("/login", status_code=303)
 
@@ -398,6 +487,7 @@ async def add_route(
     port: str = Form(...),
     host: str = Form(""),
     ssl_mode: str = Form("auto"),
+    log_level: str = Form("info"),
     cert_file: UploadFile | None = File(None),
     key_file: UploadFile | None = File(None),
 ) -> Any:
@@ -407,6 +497,7 @@ async def add_route(
     port = port.strip()
     host = normalize_host(host)
     mode = parse_ssl_mode(ssl_mode)
+    access_log = parse_log_level(log_level)
 
     err = validate_domain(domain, lang) or validate_port(port, lang)
     if err:
@@ -427,8 +518,25 @@ async def add_route(
             set_flash(response, translate(lang, "err_manual_certs_required"), "err")
             return response
 
-    routes.append({"domain": domain, "port": port, "host": host, "ssl_mode": mode})
+    routes.append(
+        {
+            "domain": domain,
+            "port": port,
+            "host": host,
+            "ssl_mode": mode,
+            "log_level": access_log,
+        }
+    )
     ok, msg = apply_routes(routes, lang)
+    audit(
+        "route_add",
+        domain=domain,
+        port=port,
+        host=host,
+        ssl_mode=mode,
+        detail=f"log={access_log}" if ok else msg,
+        ok=ok,
+    )
 
     response = RedirectResponse("/", status_code=303)
     set_flash(
@@ -446,6 +554,7 @@ async def update_route(
     port: str = Form(...),
     host: str = Form(""),
     ssl_mode: str = Form("auto"),
+    log_level: str = Form("info"),
     cert_file: UploadFile | None = File(None),
     key_file: UploadFile | None = File(None),
 ) -> Any:
@@ -455,6 +564,7 @@ async def update_route(
     port = port.strip()
     host = normalize_host(host)
     mode = parse_ssl_mode(ssl_mode)
+    access_log = parse_log_level(log_level)
 
     err = validate_port(port, lang)
     if err:
@@ -476,6 +586,7 @@ async def update_route(
             r["port"] = port
             r["host"] = host
             r["ssl_mode"] = mode
+            r["log_level"] = access_log
             found = True
             break
     if not found:
@@ -484,6 +595,15 @@ async def update_route(
         return response
 
     ok, msg = apply_routes(routes, lang)
+    audit(
+        "route_update",
+        domain=domain,
+        port=port,
+        host=host,
+        ssl_mode=mode,
+        detail=f"log={access_log}" if ok else msg,
+        ok=ok,
+    )
     response = RedirectResponse("/", status_code=303)
     set_flash(
         response,
@@ -506,6 +626,7 @@ def delete_route(request: Request, domain: str) -> Any:
         return response
 
     ok, msg = apply_routes(routes, lang)
+    audit("route_delete", domain=domain, ok=ok, detail=None if ok else msg)
     response = RedirectResponse("/", status_code=303)
     set_flash(
         response,
@@ -523,10 +644,12 @@ def reload_now(request: Request) -> Any:
     try:
         generate_caddyfile(routes, lang)
     except ValueError as exc:
+        audit("reload", ok=False, detail=str(exc))
         response = RedirectResponse("/", status_code=303)
         set_flash(response, str(exc), "err")
         return response
     ok, msg = reload_caddy(lang)
+    audit("reload", ok=ok, detail=None if ok else msg)
     response = RedirectResponse("/", status_code=303)
     set_flash(response, msg, "ok" if ok else "err")
     return response
@@ -544,9 +667,11 @@ def api_status(request: Request) -> Any:
 
 @app.on_event("startup")
 def on_startup() -> None:
+    setup_logging()
     ensure_routes_file()
     ensure_certs_dir()
     try:
         generate_caddyfile(list_routes())
-    except ValueError:
-        pass
+    except ValueError as exc:
+        log.warning("startup caddyfile skipped: %s", exc, extra={"layer": "app", "event": "startup"})
+    log.info("dashboard started", extra={"layer": "app", "event": "startup"})

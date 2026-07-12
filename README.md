@@ -29,7 +29,8 @@ caddify wraps [Caddy](https://caddyserver.com/) and a tiny FastAPI dashboard so 
 - **Automatic HTTPS** — Let's Encrypt via Caddy (HTTP-01)
 - **Manual certificates** — upload or `--cert` / `--key` PEM files per domain
 - **Optional HTTP-only routes** — `--no-ssl` / `nossl` when you do not need TLS
-- **CLI** — `./proxy add|set|rm|cert|list|status|logs`
+- **Layered logging** — access / error / app / audit + optional S3 archive upload
+- **CLI** — `./proxy add|set|rm|cert|list|status|logs|…`
 - **Web dashboard** — password-protected UI on port `9090`
 - **Host or remote backends** — default `host.docker.internal`, or any IP/hostname
 - **Hot reload** — Caddyfile regenerated and reloaded without downtime
@@ -163,6 +164,13 @@ Copy from `.env.example`:
 | `DASHBOARD_PASSWORD` | `changeme` | Dashboard login |
 | `DASHBOARD_PORT` | `9090` | Host port for the UI |
 | `DASHBOARD_SECRET` | `change-this-secret` | Session cookie signing key |
+| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `LOG_S3_ENABLED` | `0` | Set `1` to archive logs to S3 on a timer |
+| `LOG_S3_ENDPOINT` | _(empty)_ | Optional custom endpoint (MinIO, R2, …) |
+| `LOG_S3_BUCKET` | — | Target bucket |
+| `LOG_S3_ACCESS_KEY` / `LOG_S3_SECRET_KEY` | — | Credentials |
+| `LOG_S3_PREFIX` | `caddify/logs` | Object key prefix |
+| `LOG_S3_INTERVAL` | `3600` | Seconds between upload cycles |
 
 ### Routes (`routes.conf`)
 
@@ -202,6 +210,38 @@ For manual HTTPS, install files with `./proxy cert <domain> --cert … --key …
 
 If issuance fails, check `./proxy logs` and DNS / firewall.
 
+## Logging
+
+Four layers, all under `logs/`:
+
+| Layer | Path | Contents |
+|-------|------|----------|
+| **access** | `logs/caddy/access/<domain>.log` | Per-domain HTTP access (level set in dashboard / `--log`) |
+| **error** | `logs/caddy/error.log` | Caddy process / TLS / config |
+| **app** | `logs/app/caddify.log` | Dashboard / stack events (`LOG_LEVEL`) |
+| **audit** | `logs/app/audit.log` | Login, route CRUD, cert, reload |
+
+```bash
+./proxy logs              # follow all local files
+./proxy logs access
+./proxy logs audit
+./proxy logs upload       # tar.gz → S3 now (needs credentials)
+```
+
+Enable periodic upload in `.env`:
+
+```bash
+LOG_S3_ENABLED=1
+LOG_S3_BUCKET=my-bucket
+LOG_S3_ACCESS_KEY=…
+LOG_S3_SECRET_KEY=…
+# optional for MinIO / R2:
+# LOG_S3_ENDPOINT=http://127.0.0.1:9000
+./proxy up
+```
+
+Archives land in `logs/archive/` and are uploaded by the `log-shipper` service.
+
 ## MCP (for AI agents)
 
 Agents connecting to this edge should **not** reinvent TLS/reverse-proxy inside app repos. Use the caddify MCP instead.
@@ -223,8 +263,10 @@ Full Cursor config examples: [`mcp/README.md`](mcp/README.md). Also see [`AGENTS
 ├── bin/                  # thin wrappers (incl. mcp)
 ├── routes.conf           # route map
 ├── certs/                # manual TLS PEMs per domain
+├── logs/                 # access / error / app / audit (+ archive)
+├── logship/              # optional S3 archive uploader
 ├── caddy/Caddyfile       # generated
-├── docker-compose.yml    # Caddy + dashboard
+├── docker-compose.yml    # Caddy + dashboard + log-shipper
 ├── dashboard/            # FastAPI UI
 ├── mcp/                  # MCP server (stdio + HTTP)
 ├── AGENTS.md             # edge rules for coding agents

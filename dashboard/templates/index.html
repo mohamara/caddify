@@ -92,6 +92,16 @@
             <option value="off">{{ t('ssl_mode_off') }}</option>
           </select>
         </div>
+        <div class="field">
+          <label for="log_level">{{ t('col_log') }}</label>
+          <select id="log_level" name="log_level">
+            <option value="info" selected>{{ t('log_level_info') }}</option>
+            <option value="debug">{{ t('log_level_debug') }}</option>
+            <option value="warn">{{ t('log_level_warn') }}</option>
+            <option value="error">{{ t('log_level_error') }}</option>
+            <option value="off">{{ t('log_level_off') }}</option>
+          </select>
+        </div>
         <button type="submit" class="btn primary grow">{{ t('add') }}</button>
         <div class="certs-fields" id="add-certs" hidden>
           <div class="field">
@@ -123,6 +133,7 @@
               <th>{{ t('col_port') }}</th>
               <th>{{ t('col_host') }}</th>
               <th>{{ t('col_ssl') }}</th>
+              <th>{{ t('col_log') }}</th>
               <th></th>
             </tr>
           </thead>
@@ -145,6 +156,19 @@
                 <span class="tag ok">{{ t('ssl_auto_tag') }}</span>
                 {% endif %}
               </td>
+              <td>
+                {% if r.log_level == 'off' %}
+                <span class="tag off">{{ t('log_level_off') }}</span>
+                {% elif r.log_level == 'debug' %}
+                <span class="tag log-debug">DEBUG</span>
+                {% elif r.log_level == 'warn' %}
+                <span class="tag log-warn">WARN</span>
+                {% elif r.log_level == 'error' %}
+                <span class="tag log-error">ERROR</span>
+                {% else %}
+                <span class="tag log-info">INFO</span>
+                {% endif %}
+              </td>
               <td class="actions">
                 <details class="edit">
                   <summary class="btn ghost sm">{{ t('edit') }}</summary>
@@ -155,6 +179,13 @@
                       <option value="auto" {% if r.ssl_mode == 'auto' %}selected{% endif %}>{{ t('ssl_mode_auto') }}</option>
                       <option value="manual" {% if r.ssl_mode == 'manual' %}selected{% endif %}>{{ t('ssl_mode_manual') }}</option>
                       <option value="off" {% if r.ssl_mode == 'off' %}selected{% endif %}>{{ t('ssl_mode_off') }}</option>
+                    </select>
+                    <select name="log_level" aria-label="{{ t('col_log') }}">
+                      <option value="info" {% if r.log_level == 'info' %}selected{% endif %}>{{ t('log_level_info') }}</option>
+                      <option value="debug" {% if r.log_level == 'debug' %}selected{% endif %}>{{ t('log_level_debug') }}</option>
+                      <option value="warn" {% if r.log_level == 'warn' %}selected{% endif %}>{{ t('log_level_warn') }}</option>
+                      <option value="error" {% if r.log_level == 'error' %}selected{% endif %}>{{ t('log_level_error') }}</option>
+                      <option value="off" {% if r.log_level == 'off' %}selected{% endif %}>{{ t('log_level_off') }}</option>
                     </select>
                     <div class="certs-fields edit-certs" id="edit-certs-{{ loop.index }}" {% if r.ssl_mode != 'manual' %}hidden{% endif %}>
                       <label class="file-label">

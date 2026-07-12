@@ -8,7 +8,7 @@
   "language": "Language",
   "default_password_warn": "Default password is still {password} — change DASHBOARD_PASSWORD in .env.",
   "routes_heading": "Routes",
-  "routes_intro": "Point each domain to a port. Choose automatic SSL, a manual certificate, or HTTP only.",
+  "routes_intro": "Point each domain to a port. Set SSL and per-domain access log level.",
   "stat_routes": "Routes",
   "stat_acme": "ACME email",
   "add_domain": "Add domain",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "(optional replace)",
   "err_manual_certs_required": "Manual SSL needs a certificate and private key file",
   "err_manual_certs_missing": "Manual certs for {domain} not found — upload fullchain.pem and privkey.pem",
-  "mode_ssl_manual": "with manual SSL"
+  "mode_ssl_manual": "with manual SSL",
+  "col_log": "Log",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "Off"
 }

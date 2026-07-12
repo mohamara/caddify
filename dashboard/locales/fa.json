@@ -8,7 +8,7 @@
   "language": "زبان",
   "default_password_warn": "رمز پیش‌فرض هنوز {password} است — در .env مقدار DASHBOARD_PASSWORD را عوض کنید.",
   "routes_heading": "مسیرها",
-  "routes_intro": "هر دامنه را به یک پورت وصل کن. SSL خودکار، دستی، یا فقط HTTP.",
+  "routes_intro": "هر دامنه را به یک پورت وصل کن. SSL و سطح لاگ دسترسی را جداگانه تنظیم کن.",
   "stat_routes": "تعداد مسیر",
   "stat_acme": "ایمیل ACME",
   "add_domain": "افزودن دامنه",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "(جایگزینی اختیاری)",
   "err_manual_certs_required": "برای SSL دستی، فایل گواهی و کلید خصوصی لازم است",
   "err_manual_certs_missing": "گواهی دستی برای {domain} پیدا نشد — fullchain.pem و privkey.pem را آپلود کنید",
-  "mode_ssl_manual": "با SSL دستی"
+  "mode_ssl_manual": "با SSL دستی",
+  "col_log": "لاگ",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "خاموش"
 }

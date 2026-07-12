@@ -113,6 +113,10 @@ def _build_mcp() -> FastMCP:
                 )
             ),
         ] = True,
+        log_level: Annotated[
+            str | None,
+            Field(description="Per-domain access log: off|debug|info|warn|error (default info)"),
+        ] = None,
         cert_file: Annotated[
             str | None,
             Field(description="Path to fullchain/certificate PEM for manual TLS"),
@@ -138,6 +142,8 @@ def _build_mcp() -> FastMCP:
             args.append("--no-ssl")
         else:
             args.append("--ssl")
+        if log_level:
+            args.extend(["--log", log_level])
         try:
             return run_proxy(*args)
         except ProxyError as exc:
@@ -154,6 +160,10 @@ def _build_mcp() -> FastMCP:
         ssl: Annotated[
             bool | None,
             Field(description="Optional SSL flag; omit to leave unchanged via CLI default path"),
+        ] = None,
+        log_level: Annotated[
+            str | None,
+            Field(description="Optional per-domain access log: off|debug|info|warn|error"),
         ] = None,
         cert_file: Annotated[
             str | None,
@@ -176,6 +186,8 @@ def _build_mcp() -> FastMCP:
             args.append("--ssl")
         elif ssl is False:
             args.append("--no-ssl")
+        if log_level:
+            args.extend(["--log", log_level])
         try:
             return run_proxy(*args)
         except ProxyError as exc:
@@ -249,4 +261,5 @@ def run_http(host: str, port: int, token: str | None) -> None:
             raise SystemExit(
                 "CADDIFY_MCP_TOKEN is required when binding HTTP beyond localhost"
             )
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    log_level = os.environ.get("LOG_LEVEL", "info").lower()
+    uvicorn.run(app, host=host, port=port, log_level=log_level)

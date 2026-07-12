@@ -16,4 +16,4 @@ ENV DASHBOARD_PORT=9090
 
 EXPOSE 9090
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "9090"]
+CMD ["sh", "-c", "LVL=$(echo \"${LOG_LEVEL:-info}\" | tr '[:upper:]' '[:lower:]'); uvicorn app:app --host 0.0.0.0 --port 9090 --log-level \"$LVL\""]

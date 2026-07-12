@@ -8,7 +8,7 @@
   "language": "语言",
   "default_password_warn": "仍在使用默认密码 {password} — 请在 .env 中修改 DASHBOARD_PASSWORD。",
   "routes_heading": "路由",
-  "routes_intro": "将每个域名指向一个端口。可选择自动 SSL、手动证书或仅 HTTP。",
+  "routes_intro": "将每个域名指向端口。可分别设置 SSL 与访问日志级别。",
   "stat_routes": "路由数",
   "stat_acme": "ACME 邮箱",
   "add_domain": "添加域名",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "（可选替换）",
   "err_manual_certs_required": "手动 SSL 需要证书和私钥文件",
   "err_manual_certs_missing": "未找到 {domain} 的手动证书 — 请上传 fullchain.pem 和 privkey.pem",
-  "mode_ssl_manual": "使用手动 SSL"
+  "mode_ssl_manual": "使用手动 SSL",
+  "col_log": "日志",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "关闭"
 }

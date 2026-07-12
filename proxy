@@ -7,11 +7,13 @@ ROUTES="$ROOT/routes.conf"
 COMPOSE_FILE="$ROOT/docker-compose.yml"
 CADDYFILE="$ROOT/caddy/Caddyfile"
 CERTS_DIR="$ROOT/certs"
+LOGS_DIR="$ROOT/logs"
 ENV_FILE="$ROOT/.env"
 ENV_EXAMPLE="$ROOT/.env.example"
 DEFAULT_HOST="host.docker.internal"
 # Paths seen inside the Caddy container
 CERTS_CONTAINER="/certs"
+CADDY_LOG_DIR="/var/log/caddy"
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -54,6 +56,57 @@ EOF
 
 ensure_certs_dir() {
   mkdir -p "$CERTS_DIR"
+}
+
+ensure_logs_dir() {
+  mkdir -p "$LOGS_DIR/caddy/access" "$LOGS_DIR/app" "$LOGS_DIR/archive"
+}
+
+# Map LOG_LEVEL → Caddy log level
+caddy_log_level() {
+  case "${LOG_LEVEL:-INFO}" in
+    DEBUG|debug) echo DEBUG ;;
+    WARN|WARNING|warn|warning) echo WARN ;;
+    ERROR|CRITICAL|error|critical) echo ERROR ;;
+    *) echo INFO ;;
+  esac
+}
+
+# Normalize route access-log token → off|debug|info|warn|error
+normalize_route_log() {
+  case "${1,,}" in
+    ""|info|log|log=info|log=true|log=1) echo info ;;
+    off|nolog|log=off|log=false|log=0|log=no|false) echo off ;;
+    debug|log=debug) echo debug ;;
+    warn|warning|log=warn|log=warning) echo warn ;;
+    error|log=error) echo error ;;
+    *) echo info ;;
+  esac
+}
+
+caddy_access_level() {
+  case "$1" in
+    debug) echo DEBUG ;;
+    warn) echo WARN ;;
+    error) echo ERROR ;;
+    *) echo INFO ;;
+  esac
+}
+
+# Emit site access-log block (or nothing when off)
+emit_access_log() {
+  local domain="$1" level="$2"
+  [[ "$level" == "off" ]] && return 0
+  local clevel
+  clevel="$(caddy_access_level "$level")"
+  printf '\tlog {\n'
+  printf '\t\toutput file %s/access/%s.log {\n' "$CADDY_LOG_DIR" "$domain"
+  printf '\t\t\troll_size 50mb\n'
+  printf '\t\t\troll_keep 10\n'
+  printf '\t\t}\n'
+  printf '\t\tformat json\n'
+  printf '\t\tlevel %s\n' "$clevel"
+  printf '\t}\n'
 }
 
 caddy_running() {
@@ -112,32 +165,37 @@ require_manual_certs() {
     "manual SSL for $domain needs certs/$domain/fullchain.pem and privkey.pem — use: ./proxy cert $domain --cert <file> --key <file>"
 }
 
-# Write one route line: domain port [host] [nossl|manual]
-# mode: auto | off | manual
+# Write one route line: domain port [host] [nossl|manual] [log=…]
+# mode: auto | off | manual ; loglevel: off|debug|info|warn|error
 format_route_line() {
-  local domain="$1" port="$2" host="$3" mode="$4"
+  local domain="$1" port="$2" host="$3" mode="$4" loglevel="${5:-info}"
+  loglevel="$(normalize_route_log "$loglevel")"
   if [[ "$host" == "$DEFAULT_HOST" ]]; then
     case "$mode" in
-      auto) printf '%s  %s\n' "$domain" "$port" ;;
-      off) printf '%s  %s  nossl\n' "$domain" "$port" ;;
-      manual) printf '%s  %s  manual\n' "$domain" "$port" ;;
+      auto) printf '%s  %s' "$domain" "$port" ;;
+      off) printf '%s  %s  nossl' "$domain" "$port" ;;
+      manual) printf '%s  %s  manual' "$domain" "$port" ;;
       *) die "invalid ssl mode: $mode" ;;
     esac
   else
     case "$mode" in
-      auto) printf '%s  %s  %s\n' "$domain" "$port" "$host" ;;
-      off) printf '%s  %s  %s  nossl\n' "$domain" "$port" "$host" ;;
-      manual) printf '%s  %s  %s  manual\n' "$domain" "$port" "$host" ;;
+      auto) printf '%s  %s  %s' "$domain" "$port" "$host" ;;
+      off) printf '%s  %s  %s  nossl' "$domain" "$port" "$host" ;;
+      manual) printf '%s  %s  %s  manual' "$domain" "$port" "$host" ;;
       *) die "invalid ssl mode: $mode" ;;
     esac
   fi
+  if [[ "$loglevel" != "info" ]]; then
+    printf '  log=%s' "$loglevel"
+  fi
+  printf '\n'
 }
 
-# Parse active routes into DOMAIN|PORT|HOST|MODE (auto|off|manual)
+# Parse active routes into DOMAIN|PORT|HOST|MODE|LOG (auto|off|manual / off|debug|info|warn|error)
 list_routes_raw() {
   ensure_routes_file
   while IFS= read -r raw || [[ -n "$raw" ]]; do
-    local line domain port host mode=auto token
+    local line domain port host mode=auto loglevel=info token
     line="${raw%%#*}"
     line="$(trim "$line")"
     [[ -z "$line" ]] && continue
@@ -147,20 +205,28 @@ list_routes_raw() {
     port="${2:-}"
     host="$DEFAULT_HOST"
     mode=auto
+    loglevel=info
     [[ -z "$domain" || -z "$port" ]] && continue
     shift 2 || true
     for token in "$@"; do
-      if is_ssl_off_token "$token"; then
-        mode=off
-      elif is_ssl_manual_token "$token"; then
-        mode=manual
-      elif is_ssl_on_token "$token"; then
-        mode=auto
-      else
-        host="$token"
-      fi
+      case "${token,,}" in
+        nolog|log=off|log=false|log=0|log=no|log=debug|log=info|log=warn|log=warning|log=error|log)
+          loglevel="$(normalize_route_log "$token")"
+          ;;
+        *)
+          if is_ssl_off_token "$token"; then
+            mode=off
+          elif is_ssl_manual_token "$token"; then
+            mode=manual
+          elif is_ssl_on_token "$token"; then
+            mode=auto
+          else
+            host="$token"
+          fi
+          ;;
+      esac
     done
-    printf '%s|%s|%s|%s\n' "$domain" "$port" "$host" "$mode"
+    printf '%s|%s|%s|%s|%s\n' "$domain" "$port" "$host" "$mode" "$loglevel"
   done <"$ROUTES"
 }
 
@@ -182,9 +248,9 @@ validate_port() {
   (( p >= 1 && p <= 65535 )) || die "port out of range: $p"
 }
 
-# Parse args after command: domain port [host] [--no-ssl|--ssl|--manual] [--cert f] [--key f]
+# Parse args after command: domain port [host] [--no-ssl|--ssl|--manual] [--log L] [--cert f] [--key f]
 # Sets: PARSE_DOMAIN PARSE_PORT PARSE_HOST PARSE_MODE PARSE_HOST_SET PARSE_MODE_SET
-#        PARSE_CERT PARSE_KEY PARSE_CERT_SET
+#        PARSE_CERT PARSE_KEY PARSE_CERT_SET PARSE_LOG PARSE_LOG_SET
 parse_route_args() {
   PARSE_DOMAIN=""
   PARSE_PORT=""
@@ -195,6 +261,8 @@ parse_route_args() {
   PARSE_CERT=""
   PARSE_KEY=""
   PARSE_CERT_SET=0
+  PARSE_LOG=info
+  PARSE_LOG_SET=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -212,6 +280,17 @@ parse_route_args() {
         PARSE_MODE=manual
         PARSE_MODE_SET=1
         shift
+        ;;
+      --no-log|--nolog)
+        PARSE_LOG=off
+        PARSE_LOG_SET=1
+        shift
+        ;;
+      --log)
+        [[ $# -ge 2 ]] || die "--log requires off|debug|info|warn|error"
+        PARSE_LOG="$(normalize_route_log "$2")"
+        PARSE_LOG_SET=1
+        shift 2
         ;;
       --cert)
         [[ $# -ge 2 ]] || die "--cert requires a file path"
@@ -266,16 +345,28 @@ cmd_apply() {
   load_env
   ensure_routes_file
   ensure_certs_dir
+  ensure_logs_dir
   mkdir -p "$ROOT/caddy"
 
   local count=0
+  local caddy_level
+  caddy_level="$(caddy_log_level)"
   {
     printf '%s\n' '{'
     printf '\temail %s\n' "$ACME_EMAIL"
+    printf '\tlog {\n'
+    printf '\t\toutput file %s/error.log {\n' "$CADDY_LOG_DIR"
+    printf '\t\t\troll_size 20mb\n'
+    printf '\t\t\troll_keep 5\n'
+    printf '\t\t}\n'
+    printf '\t\tformat json\n'
+    printf '\t\tlevel %s\n' "$caddy_level"
+    printf '\t}\n'
     printf '%s\n\n' '}'
 
-    while IFS='|' read -r domain port host mode; do
+    while IFS='|' read -r domain port host mode loglevel; do
       [[ -z "${domain:-}" ]] && continue
+      loglevel="${loglevel:-info}"
       case "$mode" in
         off)
           printf 'http://%s {\n' "$domain"
@@ -289,6 +380,7 @@ cmd_apply() {
           printf '%s {\n' "$domain"
           ;;
       esac
+      emit_access_log "$domain" "$loglevel"
       printf '\treverse_proxy %s:%s\n' "$host" "$port"
       printf '}\n\n'
       count=$((count + 1))
@@ -296,12 +388,13 @@ cmd_apply() {
 
     if [[ "$count" -eq 0 ]]; then
       printf '%s\n' ':80 {'
+      emit_access_log "_default" "info"
       printf '\trespond "caddify ready — use: ./proxy add <domain> <port>" 200\n'
       printf '}\n\n'
     fi
   } >"$CADDYFILE"
 
-  info "Caddyfile updated ($count route(s))"
+  info "Caddyfile updated ($count route(s), log level $caddy_level)"
 
   if caddy_running; then
     docker compose -f "$COMPOSE_FILE" exec -T caddy \
@@ -340,6 +433,7 @@ cmd_setup() {
 
   ensure_routes_file
   ensure_certs_dir
+  ensure_logs_dir
   cmd_apply
   docker compose -f "$COMPOSE_FILE" up -d --build
   load_env
@@ -347,11 +441,15 @@ cmd_setup() {
   echo
   info "✓ proxy is up on :80 / :443"
   info "✓ dashboard: http://SERVER_IP:${dash_port}  (password in .env)"
+  info "✓ logs: $LOGS_DIR  (./proxy logs)"
   echo
   info "next:"
   info "  1) change DASHBOARD_PASSWORD in .env"
   info "  2) point domain DNS to this server"
   info "  3) add routes in the dashboard or: ./proxy add app.example.com 3000"
+  if [[ "${LOG_S3_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
+    info "  4) S3 log upload is enabled (LOG_S3_*)"
+  fi
 }
 
 cmd_up() {
@@ -378,8 +476,8 @@ cmd_restart() {
 
 cmd_add() {
   parse_route_args "$@"
-  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE"
-  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE" loglevel="$PARSE_LOG"
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--log L] [--cert f --key f]"
 
   validate_domain "$domain"
   validate_port "$port"
@@ -398,32 +496,36 @@ cmd_add() {
     require_manual_certs "$domain"
   fi
 
-  format_route_line "$domain" "$port" "$host" "$mode" >>"$ROUTES"
+  format_route_line "$domain" "$port" "$host" "$mode" "$loglevel" >>"$ROUTES"
 
-  info "added $domain → ${host}:${port} ($(ssl_label "$mode"))"
+  info "added $domain → ${host}:${port} ($(ssl_label "$mode"), log=$loglevel)"
   cmd_apply
 }
 
 cmd_set() {
   parse_route_args "$@"
-  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE" loglevel="$PARSE_LOG"
   local host_set="$PARSE_HOST_SET"
   local mode_set="$PARSE_MODE_SET"
+  local log_set="$PARSE_LOG_SET"
 
-  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]"
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--log L] [--cert f --key f]"
 
   validate_domain "$domain"
   validate_port "$port"
   domain_exists "$domain" || die "domain not found: $domain"
 
-  local cur_host cur_mode
+  local cur_host cur_mode cur_log
   cur_host="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $3 }')"
   cur_mode="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $4 }')"
+  cur_log="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $5 }')"
   cur_host="${cur_host:-$DEFAULT_HOST}"
   cur_mode="${cur_mode:-auto}"
+  cur_log="${cur_log:-info}"
 
   [[ "$host_set" == "1" ]] || host="$cur_host"
   [[ "$mode_set" == "1" ]] || mode="$cur_mode"
+  [[ "$log_set" == "1" ]] || loglevel="$cur_log"
 
   if [[ "$PARSE_CERT_SET" == "1" ]]; then
     install_manual_certs "$domain" "$PARSE_CERT" "$PARSE_KEY"
@@ -444,7 +546,7 @@ cmd_set() {
       set -- $line
       d="${1:-}"
       if [[ "$d" == "$domain" ]]; then
-        format_route_line "$domain" "$port" "$host" "$mode"
+        format_route_line "$domain" "$port" "$host" "$mode" "$loglevel"
         continue
       fi
     fi
@@ -452,7 +554,7 @@ cmd_set() {
   done <"$ROUTES" >"$tmp"
   mv "$tmp" "$ROUTES"
 
-  info "updated $domain → ${host}:${port} ($(ssl_label "$mode"))"
+  info "updated $domain → ${host}:${port} ($(ssl_label "$mode"), log=$loglevel)"
   cmd_apply
 }
 
@@ -492,10 +594,12 @@ cmd_cert() {
 
   install_manual_certs "$domain" "$cert" "$key"
 
-  local cur_port cur_host
+  local cur_port cur_host cur_log
   cur_port="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $2 }')"
   cur_host="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $3 }')"
+  cur_log="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $5 }')"
   cur_host="${cur_host:-$DEFAULT_HOST}"
+  cur_log="${cur_log:-info}"
 
   local tmp
   tmp="$(mktemp)"
@@ -508,7 +612,7 @@ cmd_cert() {
       set -- $line
       d="${1:-}"
       if [[ "$d" == "$domain" ]]; then
-        format_route_line "$domain" "$cur_port" "$cur_host" "manual"
+        format_route_line "$domain" "$cur_port" "$cur_host" "manual" "$cur_log"
         continue
       fi
     fi
@@ -549,9 +653,9 @@ cmd_rm() {
 cmd_list() {
   ensure_routes_file
   local n=0
-  printf '%-32s %-8s %-16s %s\n' "DOMAIN" "PORT" "HOST" "SSL"
-  printf '%-32s %-8s %-16s %s\n' "------" "----" "----" "---"
-  while IFS='|' read -r domain port host mode; do
+  printf '%-32s %-8s %-16s %-10s %s\n' "DOMAIN" "PORT" "HOST" "SSL" "LOG"
+  printf '%-32s %-8s %-16s %-10s %s\n' "------" "----" "----" "---" "---"
+  while IFS='|' read -r domain port host mode loglevel; do
     [[ -z "${domain:-}" ]] && continue
     local show_host="$host" show_ssl="$mode"
     [[ "$host" == "$DEFAULT_HOST" ]] && show_host="localhost"
@@ -560,7 +664,7 @@ cmd_list() {
       off) show_ssl="off" ;;
       manual) show_ssl="manual" ;;
     esac
-    printf '%-32s %-8s %-16s %s\n' "$domain" "$port" "$show_host" "$show_ssl"
+    printf '%-32s %-8s %-16s %-10s %s\n' "$domain" "$port" "$show_host" "$show_ssl" "${loglevel:-info}"
     n=$((n + 1))
   done < <(list_routes_raw)
 
@@ -589,13 +693,82 @@ cmd_status() {
   echo "=== config ==="
   echo "email:      $ACME_EMAIL"
   echo "certs:      $CERTS_DIR"
+  echo "logs:       $LOGS_DIR"
+  echo "log_level:  ${LOG_LEVEL:-INFO}"
+  echo "log_s3:     ${LOG_S3_ENABLED:-0}"
   echo "dashboard:  http://127.0.0.1:${DASHBOARD_PORT:-9090}"
   echo "root:       $ROOT"
 }
 
 cmd_logs() {
-  need_docker
-  docker compose -f "$COMPOSE_FILE" logs -f --tail=100 caddy
+  load_env
+  ensure_logs_dir
+  local sub="${1:-}"
+
+  case "$sub" in
+    upload)
+      need_docker
+      info "archiving logs and uploading to S3…"
+      docker compose -f "$COMPOSE_FILE" run --rm --no-deps log-shipper \
+        python -u ship.py --once --force
+      ;;
+    access)
+      local dir="$LOGS_DIR/caddy/access"
+      mkdir -p "$dir"
+      shopt -s nullglob
+      local files=("$dir"/*.log)
+      shopt -u nullglob
+      if [[ ${#files[@]} -eq 0 ]]; then
+        # legacy single file
+        local f="$LOGS_DIR/caddy/access.log"
+        [[ -f "$f" ]] || die "no access log yet under $dir"
+        tail -n "${2:-100}" -F "$f"
+      else
+        tail -n "${2:-100}" -F "${files[@]}"
+      fi
+      ;;
+    error)
+      local f="$LOGS_DIR/caddy/error.log"
+      [[ -f "$f" ]] || die "no error log yet: $f"
+      tail -n "${2:-100}" -F "$f"
+      ;;
+    app|audit)
+      local name="caddify.log"
+      [[ "$sub" == "audit" ]] && name="audit.log"
+      local f="$LOGS_DIR/app/$name"
+      [[ -f "$f" ]] || die "no $sub log yet: $f"
+      tail -n "${2:-100}" -F "$f"
+      ;;
+    follow|"")
+      need_docker
+      # Prefer file tails when present; also show container stdout
+      if [[ -f "$LOGS_DIR/caddy/access.log" || -f "$LOGS_DIR/app/caddify.log" ]]; then
+        info "following logs/ (Ctrl+C to stop) — layers: access|error|app|audit|upload"
+        tail -n 50 -F \
+          "$LOGS_DIR/caddy/access.log" \
+          "$LOGS_DIR/caddy/error.log" \
+          "$LOGS_DIR/app/caddify.log" \
+          "$LOGS_DIR/app/audit.log" \
+          2>/dev/null
+      else
+        docker compose -f "$COMPOSE_FILE" logs -f --tail=100 caddy dashboard
+      fi
+      ;;
+    help|-h|--help)
+      cat <<'EOF'
+Usage: ./proxy logs [access|error|app|audit|upload|follow]
+  (default)   follow local log files / container logs
+  access      Caddy access JSON
+  error       Caddy error JSON
+  app         dashboard/app layer
+  audit       audit layer
+  upload      archive now and push to S3 (needs LOG_S3_*)
+EOF
+      ;;
+    *)
+      die "unknown logs target: $sub — try: ./proxy logs help"
+      ;;
+  esac
 }
 
 cmd_email() {
@@ -620,13 +793,13 @@ caddify — دامنه → پورت با SSL انتخابی
 
 Usage:
   ./proxy setup [email]          نصب و روشن کردن پراکسی + داشبورد
-  ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]
-  ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]
+  ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--log L] [--cert f --key f]
+  ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--log L] [--cert f --key f]
   ./proxy cert <domain> --cert <fullchain.pem> --key <privkey.pem>
   ./proxy rm  <domain>           حذف دامنه
   ./proxy list                   لیست دامنه‌ها
   ./proxy status                 وضعیت سرویس + مسیرها
-  ./proxy logs                   لاگ زنده Caddy
+  ./proxy logs [layer|upload]    لاگ زنده / آپلود S3
   ./proxy apply                  بازسازی کانفیگ و ریلود
   ./proxy up | down | restart    کنترل کانتینر
   ./proxy email <address>        ایمیل Let's Encrypt
@@ -637,6 +810,14 @@ SSL:
   --no-ssl           فقط HTTP — بدون گواهی
   --manual           گواهی دستی از certs/<domain>/
   --cert f --key f   نصب گواهی دستی و فعال‌سازی حالت manual
+  --log L            سطح لاگ دسترسی دامنه: off|debug|info|warn|error (پیش‌فرض info)
+  --no-log           معادل --log off
+
+Logging:
+  LOG_LEVEL          DEBUG|INFO|WARNING|ERROR
+  ./proxy logs       follow all layers
+  ./proxy logs access|error|app|audit
+  ./proxy logs upload   → S3 (LOG_S3_ENABLED + credentials)
 
 Dashboard:
   http://SERVER_IP:9090
@@ -649,12 +830,17 @@ Examples:
   ./proxy add secure.example.com 4430 --cert ./fullchain.pem --key ./privkey.pem
   ./proxy cert app.example.com --cert ./fullchain.pem --key ./privkey.pem
   ./proxy set app.example.com 3001 --ssl
+  ./proxy set app.example.com 3001 --log debug
+  ./proxy logs audit
+  ./proxy logs upload
   ./proxy rm  api.example.com
 
 Notes:
   • برای SSL خودکار: DNS دامنه باید به IP این سرور اشاره کند
   • پورت‌های 80 و 443 باید باز باشند
   • گواهی دستی در certs/<domain>/fullchain.pem و privkey.pem ذخیره می‌شود
+  • لاگ‌ها در logs/ — لایه‌ها: access (per-domain), error, app, audit
+  • لاگ دسترسی هر دامنه: logs/caddy/access/<domain>.log
 EOF
 }
 

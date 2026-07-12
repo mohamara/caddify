@@ -8,7 +8,7 @@
   "language": "भाषा",
   "default_password_warn": "डिफ़ॉल्ट पासवर्ड अभी भी {password} है — .env में DASHBOARD_PASSWORD बदलें।",
   "routes_heading": "रूट्स",
-  "routes_intro": "हर डोमेन को एक पोर्ट से जोड़ें। ऑटो SSL, मैन्युअल सर्टिफिकेट, या केवल HTTP।",
+  "routes_intro": "हर डोमेन को पोर्ट से जोड़ें। SSL और एक्सेस लॉग स्तर प्रति डोमेन सेट करें।",
   "stat_routes": "रूट्स",
   "stat_acme": "ACME ईमेल",
   "add_domain": "डोमेन जोड़ें",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "(वैकल्पिक बदलें)",
   "err_manual_certs_required": "मैन्युअल SSL के लिए सर्टिफिकेट और प्राइवेट की फ़ाइल चाहिए",
   "err_manual_certs_missing": "{domain} के मैन्युअल सर्ट नहीं मिले — fullchain.pem और privkey.pem अपलोड करें",
-  "mode_ssl_manual": "मैन्युअल SSL के साथ"
+  "mode_ssl_manual": "मैन्युअल SSL के साथ",
+  "col_log": "लॉग",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "बंद"
 }

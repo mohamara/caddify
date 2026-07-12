@@ -8,7 +8,7 @@
   "language": "اللغة",
   "default_password_warn": "كلمة المرور الافتراضية ما زالت {password} — غيّر DASHBOARD_PASSWORD في .env.",
   "routes_heading": "المسارات",
-  "routes_intro": "اربط كل نطاق بمنفذ. اختر SSL تلقائي أو شهادة يدوية أو HTTP فقط.",
+  "routes_intro": "اربط كل نطاق بمنفذ. عيّن SSL ومستوى سجل الوصول لكل نطاق.",
   "stat_routes": "عدد المسارات",
   "stat_acme": "بريد ACME",
   "add_domain": "إضافة نطاق",
@@ -60,5 +60,11 @@
   "cert_replace_optional": "(استبدال اختياري)",
   "err_manual_certs_required": "يتطلب SSL اليدوي ملف شهادة ومفتاح خاص",
   "err_manual_certs_missing": "شهادات {domain} اليدوية غير موجودة — ارفع fullchain.pem و privkey.pem",
-  "mode_ssl_manual": "مع SSL يدوي"
+  "mode_ssl_manual": "مع SSL يدوي",
+  "col_log": "السجل",
+  "log_level_info": "INFO",
+  "log_level_debug": "DEBUG",
+  "log_level_warn": "WARN",
+  "log_level_error": "ERROR",
+  "log_level_off": "إيقاف"
 }

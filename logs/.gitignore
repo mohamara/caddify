@@ -1,0 +1,5 @@
+# Local log files (caddy access/error, app, audit, archives)
+# Do not commit runtime logs — keep README only.
+*
+!.gitignore
+!README.md

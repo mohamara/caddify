@@ -1,8 +1,24 @@
 {
 	email admin@example.com
+	log {
+		output file /var/log/caddy/error.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+		format json
+		level INFO
+	}
 }
 
 :80 {
+	log {
+		output file /var/log/caddy/access/_default.log {
+			roll_size 50mb
+			roll_keep 10
+		}
+		format json
+		level INFO
+	}
 	respond "caddify ready — use: ./proxy add <domain> <port>" 200
 }
 

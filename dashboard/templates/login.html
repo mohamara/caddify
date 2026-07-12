@@ -1,29 +1,40 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="{{ lang }}" dir="{{ dir }}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ورود — caddify</title>
+  <title>{{ t('title_login') }}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body class="auth-page">
   <main class="auth-shell">
+    <div class="lang-switch auth-lang">
+      <label>
+        <span class="sr-only">{{ t('language') }}</span>
+        <select aria-label="{{ t('language') }}" onchange="location.href='/lang/' + this.value">
+          {% for item in languages %}
+          <option value="{{ item.code }}" {% if item.code == lang %}selected{% endif %}>{{ item.label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
     <div class="auth-brand">
       <span class="mark" aria-hidden="true"></span>
       <h1>caddify</h1>
-      <p>مدیریت دامنه، پورت و SSL</p>
+      <p>{{ t('login_tagline') }}</p>
     </div>
 
     <form class="auth-form" method="post" action="/login" autocomplete="current-password">
-      <label for="password">رمز داشبورد</label>
+      <label for="password">{{ t('password_label') }}</label>
       <input id="password" name="password" type="password" required autofocus placeholder="••••••••" />
       {% if error %}
       <p class="flash err" role="alert">{{ error }}</p>
       {% endif %}
-      <button type="submit" class="btn primary">ورود</button>
+      <button type="submit" class="btn primary">{{ t('login') }}</button>
     </form>
   </main>
 </body>

@@ -11,6 +11,7 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
       - caddy_data:/data
       - caddy_config:/config
     extra_hosts:
@@ -31,6 +32,7 @@ services:
     volumes:
       - ./routes.conf:/data/routes.conf
       - ./caddy:/data/caddy
+      - ./certs:/data/certs
       - ./.env:/data/.env:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:

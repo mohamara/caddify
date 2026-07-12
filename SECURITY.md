@@ -59,6 +59,14 @@ Mitigations:
 - `--no-ssl` / `nossl` routes serve **plain HTTP** only — use only on trusted
   networks or behind another TLS terminator.
 
+### MCP (optional)
+
+If you expose the MCP HTTP transport (`./bin/mcp --http`):
+
+- Set a long random `CADDIFY_MCP_TOKEN`
+- Prefer binding to localhost / VPN; token is required for non-loopback binds
+- Treat MCP access like dashboard access — it can add/remove public routes
+
 ### Secrets and local files
 
 Never commit:

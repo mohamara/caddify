@@ -27,8 +27,9 @@ caddify wraps [Caddy](https://caddyserver.com/) and a tiny FastAPI dashboard so 
 ## Features
 
 - **Automatic HTTPS** — Let's Encrypt via Caddy (HTTP-01)
+- **Manual certificates** — upload or `--cert` / `--key` PEM files per domain
 - **Optional HTTP-only routes** — `--no-ssl` / `nossl` when you do not need TLS
-- **CLI** — `./proxy add|set|rm|list|status|logs`
+- **CLI** — `./proxy add|set|rm|cert|list|status|logs`
 - **Web dashboard** — password-protected UI on port `9090`
 - **Host or remote backends** — default `host.docker.internal`, or any IP/hostname
 - **Hot reload** — Caddyfile regenerated and reloaded without downtime
@@ -46,7 +47,7 @@ flowchart LR
 | Piece | Role |
 |--------|------|
 | **Caddy** | Terminates TLS (when enabled) and reverse-proxies to your backend |
-| **`routes.conf`** | Source of truth: domain, port, optional host, optional `nossl` |
+| **`routes.conf`** | Source of truth: domain, port, optional host, SSL mode (`ssl` / `nossl` / `manual`) |
 | **`./proxy`** | CLI that edits routes and regenerates the Caddyfile |
 | **Dashboard** | Same operations via a browser UI |
 
@@ -95,8 +96,9 @@ Then:
 |---------|-------------|
 | `./proxy setup [email]` | First-time install: env, Caddyfile, start stack |
 | `./proxy up` / `down` / `restart` | Start / stop / restart containers |
-| `./proxy add <domain> <port> [host] [--ssl\|--no-ssl]` | Add a route |
-| `./proxy set <domain> <port> [host] [--ssl\|--no-ssl]` | Update port / host / SSL |
+| `./proxy add <domain> <port> [host] [--ssl\|--no-ssl\|--manual] [--cert f --key f]` | Add a route |
+| `./proxy set <domain> <port> [host] [--ssl\|--no-ssl\|--manual] [--cert f --key f]` | Update port / host / SSL |
+| `./proxy cert <domain> --cert <pem> --key <pem>` | Install manual TLS certs |
 | `./proxy rm <domain>` | Remove a route |
 | `./proxy list` | List routes |
 | `./proxy status` | Containers + routes + config summary |
@@ -117,6 +119,10 @@ Convenience wrappers also exist under `bin/` (`up`, `apply`, `status`).
 # HTTP only — no certificate
 ./proxy add local.test 9000 --no-ssl
 
+# Manual certificate (copied to certs/<domain>/)
+./proxy add secure.example.com 4430 --cert ./fullchain.pem --key ./privkey.pem
+./proxy cert app.example.com --cert ./fullchain.pem --key ./privkey.pem
+
 # Backend on another host
 ./proxy add other.com 9000 10.0.0.5
 ./proxy add other.com 9000 10.0.0.5 --no-ssl
@@ -124,6 +130,7 @@ Convenience wrappers also exist under `bin/` (`up`, `apply`, `status`).
 # Change port or SSL mode
 ./proxy set app.example.com 3001
 ./proxy set app.example.com 3001 --no-ssl
+./proxy set app.example.com 3001 --ssl
 
 ./proxy rm api.example.com
 ./proxy list
@@ -138,7 +145,7 @@ Password: `DASHBOARD_PASSWORD` in `.env`
 From the UI you can:
 
 - Add / update / delete routes
-- Toggle **automatic SSL** per domain
+- Choose **automatic SSL**, **manual certificate** (upload PEM), or **HTTP only** per domain
 - Reload Caddy
 - See whether the Caddy container is running
 
@@ -162,15 +169,17 @@ Copy from `.env.example`:
 Format:
 
 ```text
-# domain  port  [host]  [ssl|nossl]
+# domain  port  [host]  [ssl|nossl|manual]
 app.example.com   3000
 api.example.com   8080  ssl
 local.test        9000  nossl
+secure.example.com 4430  manual
 other.com         9000  10.0.0.5  nossl
 ```
 
 - **host** defaults to `host.docker.internal` (your Docker host)
-- **ssl** is the default; write `nossl` (or use `--no-ssl`) for HTTP-only
+- **ssl** (auto Let's Encrypt) is the default; write `nossl` for HTTP-only
+- **manual** uses PEM files under `certs/<domain>/fullchain.pem` and `privkey.pem`
 - Prefer editing via `./proxy` or the dashboard so the Caddyfile stays in sync
 
 Generated Caddy config lives in `caddy/Caddyfile` — do not treat it as the source of truth.
@@ -179,27 +188,46 @@ Generated Caddy config lives in `caddy/Caddyfile` — do not treat it as the sou
 
 | Mode | CLI | `routes.conf` | Caddy site block |
 |------|-----|---------------|------------------|
-| HTTPS (default) | `--ssl` or omit | omit or `ssl` | `example.com { … }` → ACME |
+| HTTPS auto (default) | `--ssl` or omit | omit or `ssl` | `example.com { … }` → ACME |
+| HTTPS manual | `--cert` + `--key` or `--manual` | `manual` | `tls /certs/…/fullchain.pem /certs/…/privkey.pem` |
 | HTTP only | `--no-ssl` | `nossl` | `http://example.com { … }` |
 
-For HTTPS:
+For automatic HTTPS:
 
 1. DNS must resolve to this server
 2. Ports 80 and 443 must be reachable from the internet
 3. The first request may take a few seconds while the certificate is issued
 
+For manual HTTPS, install files with `./proxy cert <domain> --cert … --key …` (or the dashboard upload). Certificates are stored under `certs/<domain>/` and mounted read-only into Caddy.
+
 If issuance fails, check `./proxy logs` and DNS / firewall.
+
+## MCP (for AI agents)
+
+Agents connecting to this edge should **not** reinvent TLS/reverse-proxy inside app repos. Use the caddify MCP instead.
+
+```bash
+python3 -m venv mcp/.venv
+mcp/.venv/bin/pip install -r mcp/requirements.txt
+./bin/mcp                  # stdio
+./bin/mcp --http --port 9100   # remote (set CADDIFY_MCP_TOKEN)
+```
+
+Full Cursor config examples: [`mcp/README.md`](mcp/README.md). Also see [`AGENTS.md`](AGENTS.md).
 
 ## Project layout
 
 ```text
 .
 ├── proxy                 # CLI
-├── bin/                  # thin wrappers
+├── bin/                  # thin wrappers (incl. mcp)
 ├── routes.conf           # route map
+├── certs/                # manual TLS PEMs per domain
 ├── caddy/Caddyfile       # generated
 ├── docker-compose.yml    # Caddy + dashboard
 ├── dashboard/            # FastAPI UI
+├── mcp/                  # MCP server (stdio + HTTP)
+├── AGENTS.md             # edge rules for coding agents
 ├── .env.example
 ├── LICENSE
 ├── CONTRIBUTING.md

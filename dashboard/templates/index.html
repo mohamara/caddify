@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="{{ lang }}" dir="{{ dir }}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>داشبورد — caddify</title>
+  <title>{{ t('title_dashboard') }}</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Vazirmatn:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
@@ -17,16 +17,26 @@
       <span class="mark" aria-hidden="true"></span>
       <div>
         <strong>caddify</strong>
-        <span class="muted">داشبورد مدیریت</span>
+        <span class="muted">{{ t('brand_subtitle') }}</span>
       </div>
     </div>
     <div class="top-meta">
+      <div class="lang-switch">
+        <label>
+          <span class="sr-only">{{ t('language') }}</span>
+          <select aria-label="{{ t('language') }}" onchange="location.href='/lang/' + this.value">
+            {% for item in languages %}
+            <option value="{{ item.code }}" {% if item.code == lang %}selected{% endif %}>{{ item.label }}</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
       <span class="pill {% if caddy.running %}ok{% else %}bad{% endif %}">
         <span class="dot"></span>
-        Caddy {% if caddy.running %}فعال{% else %}خاموش{% endif %}
+        {% if caddy.running %}{{ t('caddy_running') }}{% else %}{{ t('caddy_stopped') }}{% endif %}
       </span>
       <form method="post" action="/logout">
-        <button type="submit" class="btn ghost">خروج</button>
+        <button type="submit" class="btn ghost">{{ t('logout') }}</button>
       </form>
     </div>
   </header>
@@ -38,56 +48,69 @@
 
     {% if default_password %}
     <div class="flash warn" role="status">
-      رمز پیش‌فرض هنوز <code>changeme</code> است — در <code>.env</code> مقدار
-      <code>DASHBOARD_PASSWORD</code> را عوض کنید.
+      {{ t('default_password_warn', password='changeme') }}
     </div>
     {% endif %}
 
     <section class="hero-panel">
       <div>
-        <h1>مسیرها</h1>
-        <p>هر دامنه یا ساب‌دامنه را به یک پورت وصل کن. برای هر کدام SSL را جداگانه روشن/خاموش کن.</p>
+        <h1>{{ t('routes_heading') }}</h1>
+        <p>{{ t('routes_intro') }}</p>
       </div>
       <dl class="stats">
         <div>
-          <dt>تعداد مسیر</dt>
+          <dt>{{ t('stat_routes') }}</dt>
           <dd>{{ routes|length }}</dd>
         </div>
         <div>
-          <dt>ایمیل ACME</dt>
+          <dt>{{ t('stat_acme') }}</dt>
           <dd class="mono">{{ email }}</dd>
         </div>
       </dl>
     </section>
 
     <section class="panel">
-      <h2>افزودن دامنه</h2>
-      <form class="add-form" method="post" action="/routes">
+      <h2>{{ t('add_domain') }}</h2>
+      <form class="add-form" method="post" action="/routes" enctype="multipart/form-data">
         <div class="field">
-          <label for="domain">دامنه</label>
+          <label for="domain">{{ t('label_domain') }}</label>
           <input id="domain" name="domain" type="text" required placeholder="app.example.com" autocomplete="off" />
         </div>
         <div class="field">
-          <label for="port">پورت</label>
+          <label for="port">{{ t('label_port') }}</label>
           <input id="port" name="port" type="number" required min="1" max="65535" placeholder="3000" />
         </div>
         <div class="field">
-          <label for="host">هاست <span class="muted">(اختیاری)</span></label>
+          <label for="host">{{ t('label_host') }} <span class="muted">{{ t('optional') }}</span></label>
           <input id="host" name="host" type="text" placeholder="localhost" autocomplete="off" />
         </div>
-        <label class="check field-check">
-          <input type="checkbox" name="ssl" value="on" checked />
-          <span>SSL خودکار</span>
-        </label>
-        <button type="submit" class="btn primary grow">افزودن</button>
+        <div class="field">
+          <label for="ssl_mode">{{ t('col_ssl') }}</label>
+          <select id="ssl_mode" name="ssl_mode" data-certs-toggle="add-certs">
+            <option value="auto" selected>{{ t('ssl_mode_auto') }}</option>
+            <option value="manual">{{ t('ssl_mode_manual') }}</option>
+            <option value="off">{{ t('ssl_mode_off') }}</option>
+          </select>
+        </div>
+        <button type="submit" class="btn primary grow">{{ t('add') }}</button>
+        <div class="certs-fields" id="add-certs" hidden>
+          <div class="field">
+            <label for="cert_file">{{ t('label_cert') }}</label>
+            <input id="cert_file" name="cert_file" type="file" accept=".pem,.crt,.cer,.cert" />
+          </div>
+          <div class="field">
+            <label for="key_file">{{ t('label_key') }}</label>
+            <input id="key_file" name="key_file" type="file" accept=".pem,.key" />
+          </div>
+        </div>
       </form>
     </section>
 
     <section class="panel">
       <div class="panel-head">
-        <h2>دامنه‌های فعال</h2>
+        <h2>{{ t('active_domains') }}</h2>
         <form method="post" action="/reload">
-          <button type="submit" class="btn ghost">اعمال مجدد</button>
+          <button type="submit" class="btn ghost">{{ t('reload') }}</button>
         </form>
       </div>
 
@@ -96,10 +119,10 @@
         <table>
           <thead>
             <tr>
-              <th>دامنه</th>
-              <th>پورت</th>
-              <th>هاست</th>
-              <th>SSL</th>
+              <th>{{ t('col_domain') }}</th>
+              <th>{{ t('col_port') }}</th>
+              <th>{{ t('col_host') }}</th>
+              <th>{{ t('col_ssl') }}</th>
               <th></th>
             </tr>
           </thead>
@@ -114,27 +137,40 @@
                 {% if r.host == 'host.docker.internal' %}localhost{% else %}{{ r.host }}{% endif %}
               </td>
               <td>
-                {% if r.ssl %}
-                <span class="tag ok">روشن</span>
+                {% if r.ssl_mode == 'manual' %}
+                <span class="tag manual">{{ t('ssl_manual') }}{% if r.has_certs %} ✓{% endif %}</span>
+                {% elif r.ssl_mode == 'off' %}
+                <span class="tag off">{{ t('ssl_off') }}</span>
                 {% else %}
-                <span class="tag off">خاموش</span>
+                <span class="tag ok">{{ t('ssl_auto_tag') }}</span>
                 {% endif %}
               </td>
               <td class="actions">
                 <details class="edit">
-                  <summary class="btn ghost sm">ویرایش</summary>
-                  <form class="edit-form" method="post" action="/routes/{{ r.domain }}/update">
-                    <input name="port" type="number" required min="1" max="65535" value="{{ r.port }}" aria-label="پورت" />
-                    <input name="host" type="text" value="{% if r.host != 'host.docker.internal' %}{{ r.host }}{% endif %}" placeholder="localhost" aria-label="هاست" />
-                    <label class="check">
-                      <input type="checkbox" name="ssl" value="on" {% if r.ssl %}checked{% endif %} />
-                      <span>SSL</span>
-                    </label>
-                    <button type="submit" class="btn primary sm">ذخیره</button>
+                  <summary class="btn ghost sm">{{ t('edit') }}</summary>
+                  <form class="edit-form" method="post" action="/routes/{{ r.domain }}/update" enctype="multipart/form-data">
+                    <input name="port" type="number" required min="1" max="65535" value="{{ r.port }}" aria-label="{{ t('label_port') }}" />
+                    <input name="host" type="text" value="{% if r.host != 'host.docker.internal' %}{{ r.host }}{% endif %}" placeholder="localhost" aria-label="{{ t('label_host') }}" />
+                    <select name="ssl_mode" aria-label="{{ t('col_ssl') }}" data-certs-toggle="edit-certs-{{ loop.index }}">
+                      <option value="auto" {% if r.ssl_mode == 'auto' %}selected{% endif %}>{{ t('ssl_mode_auto') }}</option>
+                      <option value="manual" {% if r.ssl_mode == 'manual' %}selected{% endif %}>{{ t('ssl_mode_manual') }}</option>
+                      <option value="off" {% if r.ssl_mode == 'off' %}selected{% endif %}>{{ t('ssl_mode_off') }}</option>
+                    </select>
+                    <div class="certs-fields edit-certs" id="edit-certs-{{ loop.index }}" {% if r.ssl_mode != 'manual' %}hidden{% endif %}>
+                      <label class="file-label">
+                        <span>{{ t('label_cert') }}{% if r.has_certs %} <span class="muted">{{ t('cert_replace_optional') }}</span>{% endif %}</span>
+                        <input name="cert_file" type="file" accept=".pem,.crt,.cer,.cert" />
+                      </label>
+                      <label class="file-label">
+                        <span>{{ t('label_key') }}{% if r.has_certs %} <span class="muted">{{ t('cert_replace_optional') }}</span>{% endif %}</span>
+                        <input name="key_file" type="file" accept=".pem,.key" />
+                      </label>
+                    </div>
+                    <button type="submit" class="btn primary sm">{{ t('save') }}</button>
                   </form>
                 </details>
-                <form method="post" action="/routes/{{ r.domain }}/delete" onsubmit="return confirm('حذف {{ r.domain }}؟')">
-                  <button type="submit" class="btn danger sm">حذف</button>
+                <form method="post" action="/routes/{{ r.domain }}/delete" onsubmit="return confirm({{ t('confirm_delete', domain=r.domain)|tojson }})">
+                  <button type="submit" class="btn danger sm">{{ t('delete') }}</button>
                 </form>
               </td>
             </tr>
@@ -144,16 +180,29 @@
       </div>
       {% else %}
       <div class="empty">
-        <p>هنوز دامنه‌ای نیست.</p>
-        <p class="muted">اول DNS را به IP سرور بده، بعد از فرم بالا اضافه کن.</p>
+        <p>{{ t('empty_title') }}</p>
+        <p class="muted">{{ t('empty_hint') }}</p>
       </div>
       {% endif %}
     </section>
   </main>
 
   <footer class="foot">
-    <span>پورت داشبورد: <code>9090</code></span>
-    <span>CLI: <code>./proxy help</code></span>
+    <span>{{ t('footer_port') }} <code>9090</code></span>
+    <span>{{ t('footer_cli') }} <code>./proxy help</code></span>
   </footer>
+
+  <script>
+    function bindSslToggle(select) {
+      const targetId = select.getAttribute("data-certs-toggle");
+      if (!targetId) return;
+      const panel = document.getElementById(targetId);
+      if (!panel) return;
+      const sync = () => { panel.hidden = select.value !== "manual"; };
+      select.addEventListener("change", sync);
+      sync();
+    }
+    document.querySelectorAll("select[data-certs-toggle]").forEach(bindSslToggle);
+  </script>
 </body>
 </html>

@@ -6,9 +6,12 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 ROUTES="$ROOT/routes.conf"
 COMPOSE_FILE="$ROOT/docker-compose.yml"
 CADDYFILE="$ROOT/caddy/Caddyfile"
+CERTS_DIR="$ROOT/certs"
 ENV_FILE="$ROOT/.env"
 ENV_EXAMPLE="$ROOT/.env.example"
 DEFAULT_HOST="host.docker.internal"
+# Paths seen inside the Caddy container
+CERTS_CONTAINER="/certs"
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -40,11 +43,17 @@ trim() {
 ensure_routes_file() {
   if [[ ! -f "$ROUTES" ]]; then
     cat >"$ROUTES" <<'EOF'
-# domain  port  [host]  [ssl|nossl]
+# domain  port  [host]  [ssl|nossl|manual]
 # example: app.example.com  3000
 # example: local.test       8080  nossl
+# example: secure.example.com  4430  manual
+#   (manual expects certs/<domain>/fullchain.pem + privkey.pem)
 EOF
   fi
+}
+
+ensure_certs_dir() {
+  mkdir -p "$CERTS_DIR"
 }
 
 caddy_running() {
@@ -53,41 +62,82 @@ caddy_running() {
 
 is_ssl_off_token() {
   case "${1,,}" in
-    nossl|http|no-ssl|ssl=false|ssl=0|false) return 0 ;;
+    nossl|http|no-ssl|ssl=false|ssl=0|false|off) return 0 ;;
     *) return 1 ;;
   esac
 }
 
 is_ssl_on_token() {
   case "${1,,}" in
-    ssl|https|ssl=true|ssl=1|true) return 0 ;;
+    ssl|https|ssl=true|ssl=1|true|auto) return 0 ;;
     *) return 1 ;;
   esac
 }
 
-# Write one route line: domain port [host] [nossl]
+is_ssl_manual_token() {
+  case "${1,,}" in
+    manual|custom|cert|tls-manual) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Host paths for a domain's manual cert pair
+cert_fullchain_host() { printf '%s/%s/fullchain.pem' "$CERTS_DIR" "$1"; }
+cert_privkey_host() { printf '%s/%s/privkey.pem' "$CERTS_DIR" "$1"; }
+cert_fullchain_caddy() { printf '%s/%s/fullchain.pem' "$CERTS_CONTAINER" "$1"; }
+cert_privkey_caddy() { printf '%s/%s/privkey.pem' "$CERTS_CONTAINER" "$1"; }
+
+has_manual_certs() {
+  local domain="$1"
+  [[ -f "$(cert_fullchain_host "$domain")" && -f "$(cert_privkey_host "$domain")" ]]
+}
+
+install_manual_certs() {
+  local domain="$1" cert_src="$2" key_src="$3"
+  local dest_dir="$CERTS_DIR/$domain"
+  [[ -f "$cert_src" ]] || die "certificate file not found: $cert_src"
+  [[ -f "$key_src" ]] || die "private key file not found: $key_src"
+  ensure_certs_dir
+  mkdir -p "$dest_dir"
+  cp -f "$cert_src" "$dest_dir/fullchain.pem"
+  cp -f "$key_src" "$dest_dir/privkey.pem"
+  chmod 644 "$dest_dir/fullchain.pem"
+  chmod 600 "$dest_dir/privkey.pem"
+  info "installed manual certs for $domain → certs/$domain/"
+}
+
+require_manual_certs() {
+  local domain="$1"
+  has_manual_certs "$domain" || die \
+    "manual SSL for $domain needs certs/$domain/fullchain.pem and privkey.pem — use: ./proxy cert $domain --cert <file> --key <file>"
+}
+
+# Write one route line: domain port [host] [nossl|manual]
+# mode: auto | off | manual
 format_route_line() {
-  local domain="$1" port="$2" host="$3" ssl="$4"
+  local domain="$1" port="$2" host="$3" mode="$4"
   if [[ "$host" == "$DEFAULT_HOST" ]]; then
-    if [[ "$ssl" == "1" ]]; then
-      printf '%s  %s\n' "$domain" "$port"
-    else
-      printf '%s  %s  nossl\n' "$domain" "$port"
-    fi
+    case "$mode" in
+      auto) printf '%s  %s\n' "$domain" "$port" ;;
+      off) printf '%s  %s  nossl\n' "$domain" "$port" ;;
+      manual) printf '%s  %s  manual\n' "$domain" "$port" ;;
+      *) die "invalid ssl mode: $mode" ;;
+    esac
   else
-    if [[ "$ssl" == "1" ]]; then
-      printf '%s  %s  %s\n' "$domain" "$port" "$host"
-    else
-      printf '%s  %s  %s  nossl\n' "$domain" "$port" "$host"
-    fi
+    case "$mode" in
+      auto) printf '%s  %s  %s\n' "$domain" "$port" "$host" ;;
+      off) printf '%s  %s  %s  nossl\n' "$domain" "$port" "$host" ;;
+      manual) printf '%s  %s  %s  manual\n' "$domain" "$port" "$host" ;;
+      *) die "invalid ssl mode: $mode" ;;
+    esac
   fi
 }
 
-# Parse active routes into DOMAIN|PORT|HOST|SSL (SSL=1|0)
+# Parse active routes into DOMAIN|PORT|HOST|MODE (auto|off|manual)
 list_routes_raw() {
   ensure_routes_file
   while IFS= read -r raw || [[ -n "$raw" ]]; do
-    local line domain port host ssl=1 token
+    local line domain port host mode=auto token
     line="${raw%%#*}"
     line="$(trim "$line")"
     [[ -z "$line" ]] && continue
@@ -96,19 +146,21 @@ list_routes_raw() {
     domain="${1:-}"
     port="${2:-}"
     host="$DEFAULT_HOST"
-    ssl=1
+    mode=auto
     [[ -z "$domain" || -z "$port" ]] && continue
     shift 2 || true
     for token in "$@"; do
       if is_ssl_off_token "$token"; then
-        ssl=0
+        mode=off
+      elif is_ssl_manual_token "$token"; then
+        mode=manual
       elif is_ssl_on_token "$token"; then
-        ssl=1
+        mode=auto
       else
         host="$token"
       fi
     done
-    printf '%s|%s|%s|%s\n' "$domain" "$port" "$host" "$ssl"
+    printf '%s|%s|%s|%s\n' "$domain" "$port" "$host" "$mode"
   done <"$ROUTES"
 }
 
@@ -130,24 +182,52 @@ validate_port() {
   (( p >= 1 && p <= 65535 )) || die "port out of range: $p"
 }
 
-# Parse args after command: domain port [host] [--no-ssl|--ssl]
-# Sets: PARSE_DOMAIN PARSE_PORT PARSE_HOST PARSE_SSL PARSE_HOST_SET
+# Parse args after command: domain port [host] [--no-ssl|--ssl|--manual] [--cert f] [--key f]
+# Sets: PARSE_DOMAIN PARSE_PORT PARSE_HOST PARSE_MODE PARSE_HOST_SET PARSE_MODE_SET
+#        PARSE_CERT PARSE_KEY PARSE_CERT_SET
 parse_route_args() {
   PARSE_DOMAIN=""
   PARSE_PORT=""
   PARSE_HOST="$DEFAULT_HOST"
-  PARSE_SSL=1
+  PARSE_MODE=auto
   PARSE_HOST_SET=0
+  PARSE_MODE_SET=0
+  PARSE_CERT=""
+  PARSE_KEY=""
+  PARSE_CERT_SET=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --no-ssl|nossl)
-        PARSE_SSL=0
+        PARSE_MODE=off
+        PARSE_MODE_SET=1
         shift
         ;;
       --ssl|ssl)
-        PARSE_SSL=1
+        PARSE_MODE=auto
+        PARSE_MODE_SET=1
         shift
+        ;;
+      --manual|manual)
+        PARSE_MODE=manual
+        PARSE_MODE_SET=1
+        shift
+        ;;
+      --cert)
+        [[ $# -ge 2 ]] || die "--cert requires a file path"
+        PARSE_CERT="$2"
+        PARSE_CERT_SET=1
+        PARSE_MODE=manual
+        PARSE_MODE_SET=1
+        shift 2
+        ;;
+      --key)
+        [[ $# -ge 2 ]] || die "--key requires a file path"
+        PARSE_KEY="$2"
+        PARSE_CERT_SET=1
+        PARSE_MODE=manual
+        PARSE_MODE_SET=1
+        shift 2
         ;;
       -*)
         die "unknown flag: $1"
@@ -165,6 +245,19 @@ parse_route_args() {
         ;;
     esac
   done
+
+  if [[ "$PARSE_CERT_SET" == "1" ]]; then
+    [[ -n "$PARSE_CERT" && -n "$PARSE_KEY" ]] || die "--cert and --key must both be provided"
+  fi
+}
+
+ssl_label() {
+  case "$1" in
+    auto) echo "SSL auto (Let's Encrypt)" ;;
+    off) echo "SSL off / HTTP only" ;;
+    manual) echo "SSL manual cert" ;;
+    *) echo "SSL $1" ;;
+  esac
 }
 
 # ── core: generate + reload ──────────────────────────────────────────
@@ -172,6 +265,7 @@ parse_route_args() {
 cmd_apply() {
   load_env
   ensure_routes_file
+  ensure_certs_dir
   mkdir -p "$ROOT/caddy"
 
   local count=0
@@ -180,13 +274,21 @@ cmd_apply() {
     printf '\temail %s\n' "$ACME_EMAIL"
     printf '%s\n\n' '}'
 
-    while IFS='|' read -r domain port host ssl; do
+    while IFS='|' read -r domain port host mode; do
       [[ -z "${domain:-}" ]] && continue
-      if [[ "$ssl" == "1" ]]; then
-        printf '%s {\n' "$domain"
-      else
-        printf 'http://%s {\n' "$domain"
-      fi
+      case "$mode" in
+        off)
+          printf 'http://%s {\n' "$domain"
+          ;;
+        manual)
+          require_manual_certs "$domain"
+          printf '%s {\n' "$domain"
+          printf '\ttls %s %s\n' "$(cert_fullchain_caddy "$domain")" "$(cert_privkey_caddy "$domain")"
+          ;;
+        *)
+          printf '%s {\n' "$domain"
+          ;;
+      esac
       printf '\treverse_proxy %s:%s\n' "$host" "$port"
       printf '}\n\n'
       count=$((count + 1))
@@ -237,6 +339,7 @@ cmd_setup() {
   fi
 
   ensure_routes_file
+  ensure_certs_dir
   cmd_apply
   docker compose -f "$COMPOSE_FILE" up -d --build
   load_env
@@ -275,54 +378,60 @@ cmd_restart() {
 
 cmd_add() {
   parse_route_args "$@"
-  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" ssl="$PARSE_SSL"
-  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy add <domain> <port> [host] [--no-ssl|--ssl]"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE"
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]"
 
   validate_domain "$domain"
   validate_port "$port"
   ensure_routes_file
+  ensure_certs_dir
 
   if domain_exists "$domain"; then
     die "domain already exists: $domain (use: ./proxy set $domain $port)"
   fi
 
-  format_route_line "$domain" "$port" "$host" "$ssl" >>"$ROUTES"
-
-  if [[ "$ssl" == "1" ]]; then
-    info "added $domain → ${host}:${port} (SSL on)"
-  else
-    info "added $domain → ${host}:${port} (SSL off / HTTP only)"
+  if [[ "$PARSE_CERT_SET" == "1" ]]; then
+    install_manual_certs "$domain" "$PARSE_CERT" "$PARSE_KEY"
+    mode=manual
   fi
+  if [[ "$mode" == "manual" ]]; then
+    require_manual_certs "$domain"
+  fi
+
+  format_route_line "$domain" "$port" "$host" "$mode" >>"$ROUTES"
+
+  info "added $domain → ${host}:${port} ($(ssl_label "$mode"))"
   cmd_apply
 }
 
 cmd_set() {
   parse_route_args "$@"
-  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" ssl="$PARSE_SSL"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" mode="$PARSE_MODE"
   local host_set="$PARSE_HOST_SET"
-  local ssl_set=0
+  local mode_set="$PARSE_MODE_SET"
 
-  # detect if ssl flag was explicitly passed
-  for a in "$@"; do
-    case "$a" in
-      --no-ssl|nossl|--ssl|ssl) ssl_set=1 ;;
-    esac
-  done
-
-  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy set <domain> <port> [host] [--no-ssl|--ssl]"
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]"
 
   validate_domain "$domain"
   validate_port "$port"
   domain_exists "$domain" || die "domain not found: $domain"
 
-  local cur_host cur_ssl
+  local cur_host cur_mode
   cur_host="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $3 }')"
-  cur_ssl="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $4 }')"
+  cur_mode="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $4 }')"
   cur_host="${cur_host:-$DEFAULT_HOST}"
-  cur_ssl="${cur_ssl:-1}"
+  cur_mode="${cur_mode:-auto}"
 
   [[ "$host_set" == "1" ]] || host="$cur_host"
-  [[ "$ssl_set" == "1" ]] || ssl="$cur_ssl"
+  [[ "$mode_set" == "1" ]] || mode="$cur_mode"
+
+  if [[ "$PARSE_CERT_SET" == "1" ]]; then
+    install_manual_certs "$domain" "$PARSE_CERT" "$PARSE_KEY"
+    mode=manual
+  fi
+  if [[ "$mode" == "manual" ]]; then
+    require_manual_certs "$domain"
+  fi
 
   local tmp
   tmp="$(mktemp)"
@@ -335,7 +444,7 @@ cmd_set() {
       set -- $line
       d="${1:-}"
       if [[ "$d" == "$domain" ]]; then
-        format_route_line "$domain" "$port" "$host" "$ssl"
+        format_route_line "$domain" "$port" "$host" "$mode"
         continue
       fi
     fi
@@ -343,11 +452,71 @@ cmd_set() {
   done <"$ROUTES" >"$tmp"
   mv "$tmp" "$ROUTES"
 
-  if [[ "$ssl" == "1" ]]; then
-    info "updated $domain → ${host}:${port} (SSL on)"
-  else
-    info "updated $domain → ${host}:${port} (SSL off)"
-  fi
+  info "updated $domain → ${host}:${port} ($(ssl_label "$mode"))"
+  cmd_apply
+}
+
+cmd_cert() {
+  local domain="" cert="" key=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cert)
+        [[ $# -ge 2 ]] || die "--cert requires a file path"
+        cert="$2"
+        shift 2
+        ;;
+      --key)
+        [[ $# -ge 2 ]] || die "--key requires a file path"
+        key="$2"
+        shift 2
+        ;;
+      -*)
+        die "unknown flag: $1"
+        ;;
+      *)
+        if [[ -z "$domain" ]]; then
+          domain="$1"
+        else
+          die "unexpected argument: $1"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$domain" && -n "$cert" && -n "$key" ]] || \
+    die "usage: ./proxy cert <domain> --cert <fullchain.pem> --key <privkey.pem>"
+
+  validate_domain "$domain"
+  domain_exists "$domain" || die "domain not found: $domain — add it first with ./proxy add"
+
+  install_manual_certs "$domain" "$cert" "$key"
+
+  local cur_port cur_host
+  cur_port="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $2 }')"
+  cur_host="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $3 }')"
+  cur_host="${cur_host:-$DEFAULT_HOST}"
+
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    local line d
+    line="${raw%%#*}"
+    line="$(trim "$line")"
+    if [[ -n "$line" ]]; then
+      # shellcheck disable=SC2086
+      set -- $line
+      d="${1:-}"
+      if [[ "$d" == "$domain" ]]; then
+        format_route_line "$domain" "$cur_port" "$cur_host" "manual"
+        continue
+      fi
+    fi
+    printf '%s\n' "$raw"
+  done <"$ROUTES" >"$tmp"
+  mv "$tmp" "$ROUTES"
+
+  info "SSL mode for $domain → manual"
   cmd_apply
 }
 
@@ -382,11 +551,15 @@ cmd_list() {
   local n=0
   printf '%-32s %-8s %-16s %s\n' "DOMAIN" "PORT" "HOST" "SSL"
   printf '%-32s %-8s %-16s %s\n' "------" "----" "----" "---"
-  while IFS='|' read -r domain port host ssl; do
+  while IFS='|' read -r domain port host mode; do
     [[ -z "${domain:-}" ]] && continue
-    local show_host="$host" show_ssl="on"
+    local show_host="$host" show_ssl="$mode"
     [[ "$host" == "$DEFAULT_HOST" ]] && show_host="localhost"
-    [[ "$ssl" == "1" ]] || show_ssl="off"
+    case "$mode" in
+      auto) show_ssl="auto" ;;
+      off) show_ssl="off" ;;
+      manual) show_ssl="manual" ;;
+    esac
     printf '%-32s %-8s %-16s %s\n' "$domain" "$port" "$show_host" "$show_ssl"
     n=$((n + 1))
   done < <(list_routes_raw)
@@ -415,6 +588,7 @@ cmd_status() {
   load_env
   echo "=== config ==="
   echo "email:      $ACME_EMAIL"
+  echo "certs:      $CERTS_DIR"
   echo "dashboard:  http://127.0.0.1:${DASHBOARD_PORT:-9090}"
   echo "root:       $ROOT"
 }
@@ -446,8 +620,9 @@ caddify — دامنه → پورت با SSL انتخابی
 
 Usage:
   ./proxy setup [email]          نصب و روشن کردن پراکسی + داشبورد
-  ./proxy add <domain> <port> [host] [--ssl|--no-ssl]
-  ./proxy set <domain> <port> [host] [--ssl|--no-ssl]
+  ./proxy add <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]
+  ./proxy set <domain> <port> [host] [--ssl|--no-ssl|--manual] [--cert f --key f]
+  ./proxy cert <domain> --cert <fullchain.pem> --key <privkey.pem>
   ./proxy rm  <domain>           حذف دامنه
   ./proxy list                   لیست دامنه‌ها
   ./proxy status                 وضعیت سرویس + مسیرها
@@ -458,8 +633,10 @@ Usage:
   ./proxy help                   همین راهنما
 
 SSL:
-  --ssl      گواهی خودکار Let's Encrypt (پیش‌فرض)
-  --no-ssl   فقط HTTP — بدون گواهی
+  --ssl              گواهی خودکار Let's Encrypt (پیش‌فرض)
+  --no-ssl           فقط HTTP — بدون گواهی
+  --manual           گواهی دستی از certs/<domain>/
+  --cert f --key f   نصب گواهی دستی و فعال‌سازی حالت manual
 
 Dashboard:
   http://SERVER_IP:9090
@@ -469,13 +646,15 @@ Examples:
   ./proxy add app.example.com 3000
   ./proxy add api.example.com 8080 --ssl
   ./proxy add local.test 9000 --no-ssl
-  ./proxy add other.com 9000 10.0.0.5 --no-ssl
-  ./proxy set app.example.com 3001 --no-ssl
+  ./proxy add secure.example.com 4430 --cert ./fullchain.pem --key ./privkey.pem
+  ./proxy cert app.example.com --cert ./fullchain.pem --key ./privkey.pem
+  ./proxy set app.example.com 3001 --ssl
   ./proxy rm  api.example.com
 
 Notes:
-  • برای SSL: DNS دامنه باید به IP این سرور اشاره کند
+  • برای SSL خودکار: DNS دامنه باید به IP این سرور اشاره کند
   • پورت‌های 80 و 443 باید باز باشند
+  • گواهی دستی در certs/<domain>/fullchain.pem و privkey.pem ذخیره می‌شود
 EOF
 }
 
@@ -492,6 +671,7 @@ main() {
     restart)      cmd_restart "$@" ;;
     add)          cmd_add "$@" ;;
     set|update)   cmd_set "$@" ;;
+    cert|tls)     cmd_cert "$@" ;;
     rm|remove|del|delete) cmd_rm "$@" ;;
     list|ls)      cmd_list "$@" ;;
     status|ps)    cmd_status "$@" ;;

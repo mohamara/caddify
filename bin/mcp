@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run caddify MCP (stdio by default). Usage: bin/mcp [--http] ...
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+export CADDIFY_ROOT="${CADDIFY_ROOT:-$ROOT}"
+VENV_PY="$ROOT/mcp/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  echo "error: mcp venv missing — run: python3 -m venv mcp/.venv && mcp/.venv/bin/pip install -r mcp/requirements.txt" >&2
+  exit 1
+fi
+cd "$ROOT/mcp"
+exec "$VENV_PY" -m caddify_mcp "$@"

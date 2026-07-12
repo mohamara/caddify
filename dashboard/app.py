@@ -1,4 +1,4 @@
-"""caddify dashboard — manage domain → port routes with auto SSL."""
+"""caddify dashboard — manage domain → port routes with auto / manual SSL."""
 
 from __future__ import annotations
 
@@ -9,25 +9,31 @@ from pathlib import Path
 from typing import Any
 
 import docker
-from fastapi import FastAPI, Form, HTTPException, Request, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeSerializer
 from starlette.middleware.sessions import SessionMiddleware
 
+from i18n import get_lang, make_t, set_lang_cookie, supported, template_ctx, translate
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 ROUTES_FILE = DATA_DIR / "routes.conf"
 CADDYFILE = DATA_DIR / "caddy" / "Caddyfile"
+CERTS_DIR = DATA_DIR / "certs"
 ENV_FILE = DATA_DIR / ".env"
 CADDY_CONTAINER = os.environ.get("CADDY_CONTAINER", "caddify")
 DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme")
 SECRET_KEY = os.environ.get("DASHBOARD_SECRET", secrets.token_hex(32))
+CERTS_CONTAINER = "/certs"
 
 DOMAIN_RE = re.compile(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$")
 DEFAULT_HOST = "host.docker.internal"
-SSL_OFF_TOKENS = {"nossl", "http", "no-ssl", "ssl=false", "ssl=0", "false"}
-SSL_ON_TOKENS = {"ssl", "https", "ssl=true", "ssl=1", "true"}
+SSL_OFF_TOKENS = {"nossl", "http", "no-ssl", "ssl=false", "ssl=0", "false", "off"}
+SSL_ON_TOKENS = {"ssl", "https", "ssl=true", "ssl=1", "true", "auto"}
+SSL_MANUAL_TOKENS = {"manual", "custom", "cert", "tls-manual"}
+SSL_MODES = {"auto", "off", "manual"}
 
 
 def normalize_host(host: str) -> str:
@@ -37,11 +43,53 @@ def normalize_host(host: str) -> str:
     return host
 
 
-def parse_ssl_form(value: str | None) -> bool:
-    """Checkbox: present/on → True; missing/empty → False."""
-    if value is None:
+def parse_ssl_mode(value: str | None) -> str:
+    """Form select: auto | off | manual. Legacy checkbox 'on' → auto."""
+    if value is None or not str(value).strip():
+        return "off"
+    low = value.strip().lower()
+    if low in {"on", "1", "true", "yes", "ssl"}:
+        return "auto"
+    if low in SSL_MODES:
+        return low
+    return "off"
+
+
+def cert_paths(domain: str) -> tuple[Path, Path]:
+    base = CERTS_DIR / domain
+    return base / "fullchain.pem", base / "privkey.pem"
+
+
+def has_manual_certs(domain: str) -> bool:
+    fullchain, privkey = cert_paths(domain)
+    return fullchain.is_file() and privkey.is_file()
+
+
+async def save_uploaded_certs(
+    domain: str,
+    cert_file: UploadFile | None,
+    key_file: UploadFile | None,
+) -> bool:
+    """Save uploaded PEM pair. Returns True if both files were written."""
+    if cert_file is None or key_file is None:
         return False
-    return value.strip().lower() in {"1", "true", "on", "yes", "ssl"}
+    if not cert_file.filename or not key_file.filename:
+        return False
+
+    dest = CERTS_DIR / domain
+    dest.mkdir(parents=True, exist_ok=True)
+    fullchain, privkey = cert_paths(domain)
+
+    cert_bytes = await cert_file.read()
+    key_bytes = await key_file.read()
+    if not cert_bytes or not key_bytes:
+        return False
+
+    fullchain.write_bytes(cert_bytes)
+    privkey.write_bytes(key_bytes)
+    fullchain.chmod(0o644)
+    privkey.chmod(0o600)
+    return True
 
 
 app = FastAPI(title="caddify", docs_url=None, redoc_url=None)
@@ -51,6 +99,17 @@ templates = Jinja2Templates(directory="templates")
 signer = URLSafeSerializer(SECRET_KEY, salt="flash")
 
 
+def t_req(request: Request, key: str, **kwargs: Any) -> str:
+    return translate(get_lang(request), key, **kwargs)
+
+
+def render(request: Request, name: str, context: dict[str, Any] | None = None, status_code: int = 200) -> Any:
+    ctx = template_ctx(request)
+    if context:
+        ctx.update(context)
+    return templates.TemplateResponse(request, name, ctx, status_code=status_code)
+
+
 # ── routes file ──────────────────────────────────────────────────────
 
 
@@ -58,9 +117,13 @@ def ensure_routes_file() -> None:
     ROUTES_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ROUTES_FILE.exists():
         ROUTES_FILE.write_text(
-            "# domain  port  [host]  [ssl|nossl]\n# managed by caddify dashboard\n",
+            "# domain  port  [host]  [ssl|nossl|manual]\n# managed by caddify dashboard\n",
             encoding="utf-8",
         )
+
+
+def ensure_certs_dir() -> None:
+    CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def read_acme_email() -> str:
@@ -84,27 +147,40 @@ def list_routes() -> list[dict[str, Any]]:
             continue
         domain, port = parts[0], parts[1]
         host = DEFAULT_HOST
-        ssl = True
+        ssl_mode = "auto"
         for token in parts[2:]:
             low = token.lower()
             if low in SSL_OFF_TOKENS:
-                ssl = False
+                ssl_mode = "off"
+            elif low in SSL_MANUAL_TOKENS:
+                ssl_mode = "manual"
             elif low in SSL_ON_TOKENS:
-                ssl = True
+                ssl_mode = "auto"
             else:
                 host = token
-        routes.append({"domain": domain, "port": port, "host": host, "ssl": ssl})
+        routes.append(
+            {
+                "domain": domain,
+                "port": port,
+                "host": host,
+                "ssl_mode": ssl_mode,
+                "ssl": ssl_mode != "off",
+                "has_certs": has_manual_certs(domain),
+            }
+        )
     return routes
 
 
 def format_route_line(route: dict[str, Any]) -> str:
     host = route.get("host") or DEFAULT_HOST
-    ssl = bool(route.get("ssl", True))
+    mode = route.get("ssl_mode") or ("auto" if route.get("ssl", True) else "off")
     parts = [route["domain"], str(route["port"])]
     if host != DEFAULT_HOST:
         parts.append(host)
-    if not ssl:
+    if mode == "off":
         parts.append("nossl")
+    elif mode == "manual":
+        parts.append("manual")
     return "  ".join(parts)
 
 
@@ -112,7 +188,7 @@ def write_routes(routes: list[dict[str, Any]]) -> None:
     ensure_routes_file()
     lines = [
         "# managed by caddify dashboard / CLI",
-        "# domain  port  [host]  [ssl|nossl]",
+        "# domain  port  [host]  [ssl|nossl|manual]",
         "",
     ]
     for r in routes:
@@ -121,9 +197,10 @@ def write_routes(routes: list[dict[str, Any]]) -> None:
     ROUTES_FILE.write_text("\n".join(lines), encoding="utf-8")
 
 
-def generate_caddyfile(routes: list[dict[str, Any]]) -> None:
+def generate_caddyfile(routes: list[dict[str, Any]], lang: str = "en") -> None:
     email = read_acme_email()
     CADDYFILE.parent.mkdir(parents=True, exist_ok=True)
+    ensure_certs_dir()
     chunks = ["{", f"\temail {email}", "}", ""]
     if not routes:
         chunks += [
@@ -135,22 +212,43 @@ def generate_caddyfile(routes: list[dict[str, Any]]) -> None:
     else:
         for r in routes:
             host = r.get("host") or DEFAULT_HOST
-            site = r["domain"] if r.get("ssl", True) else f"http://{r['domain']}"
-            chunks += [
-                f"{site} {{",
-                f"\treverse_proxy {host}:{r['port']}",
-                "}",
-                "",
-            ]
+            mode = r.get("ssl_mode") or ("auto" if r.get("ssl", True) else "off")
+            if mode == "off":
+                site_lines = [
+                    f"http://{r['domain']} {{",
+                    f"\treverse_proxy {host}:{r['port']}",
+                    "}",
+                ]
+            elif mode == "manual":
+                if not has_manual_certs(r["domain"]):
+                    raise ValueError(
+                        translate(lang, "err_manual_certs_missing", domain=r["domain"])
+                    )
+                c_path = f"{CERTS_CONTAINER}/{r['domain']}/fullchain.pem"
+                k_path = f"{CERTS_CONTAINER}/{r['domain']}/privkey.pem"
+                site_lines = [
+                    f"{r['domain']} {{",
+                    f"\ttls {c_path} {k_path}",
+                    f"\treverse_proxy {host}:{r['port']}",
+                    "}",
+                ]
+            else:
+                site_lines = [
+                    f"{r['domain']} {{",
+                    f"\treverse_proxy {host}:{r['port']}",
+                    "}",
+                ]
+            chunks += site_lines + [""]
     CADDYFILE.write_text("\n".join(chunks), encoding="utf-8")
 
 
-def reload_caddy() -> tuple[bool, str]:
+def reload_caddy(lang: str = "en") -> tuple[bool, str]:
+    t = make_t(lang)
     try:
         client = docker.from_env()
         container = client.containers.get(CADDY_CONTAINER)
         if container.status != "running":
-            return False, "کانتینر Caddy روشن نیست"
+            return False, t("err_caddy_not_running")
         result = container.exec_run(
             ["caddy", "reload", "--config", "/etc/caddy/Caddyfile"],
             user="root",
@@ -158,28 +256,31 @@ def reload_caddy() -> tuple[bool, str]:
         if result.exit_code != 0:
             out = (result.output or b"").decode("utf-8", errors="replace")
             return False, out.strip() or "reload failed"
-        return True, "اعمال شد"
+        return True, t("msg_applied")
     except docker.errors.NotFound:
-        return False, f"کانتینر «{CADDY_CONTAINER}» پیدا نشد"
+        return False, t("err_caddy_not_found", name=CADDY_CONTAINER)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
 
 
-def apply_routes(routes: list[dict[str, Any]]) -> tuple[bool, str]:
+def apply_routes(routes: list[dict[str, Any]], lang: str = "en") -> tuple[bool, str]:
     write_routes(routes)
-    generate_caddyfile(routes)
-    return reload_caddy()
+    try:
+        generate_caddyfile(routes, lang)
+    except ValueError as exc:
+        return False, str(exc)
+    return reload_caddy(lang)
 
 
-def validate_domain(domain: str) -> str | None:
+def validate_domain(domain: str, lang: str = "en") -> str | None:
     if not DOMAIN_RE.match(domain):
-        return "دامنه نامعتبر است"
+        return translate(lang, "err_invalid_domain")
     return None
 
 
-def validate_port(port: str) -> str | None:
+def validate_port(port: str, lang: str = "en") -> str | None:
     if not port.isdigit() or not (1 <= int(port) <= 65535):
-        return "پورت نامعتبر است"
+        return translate(lang, "err_invalid_port")
     return None
 
 
@@ -190,6 +291,14 @@ def caddy_status() -> dict[str, Any]:
         return {"running": container.status == "running", "status": container.status}
     except Exception:  # noqa: BLE001
         return {"running": False, "status": "unknown"}
+
+
+def mode_label(lang: str, mode: str) -> str:
+    if mode == "manual":
+        return translate(lang, "mode_ssl_manual")
+    if mode == "off":
+        return translate(lang, "mode_nossl")
+    return translate(lang, "mode_ssl")
 
 
 # ── auth helpers ─────────────────────────────────────────────────────
@@ -222,15 +331,20 @@ def pop_flash(request: Request) -> dict[str, str] | None:
 # ── pages ────────────────────────────────────────────────────────────
 
 
+@app.get("/lang/{code}")
+def set_language(request: Request, code: str) -> Any:
+    lang = code if supported(code) else "en"
+    referer = request.headers.get("referer") or "/"
+    response = RedirectResponse(referer, status_code=303)
+    set_lang_cookie(response, lang)
+    return response
+
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request) -> Any:
     if is_authed(request):
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(
-        request,
-        "login.html",
-        {"error": None},
-    )
+    return render(request, "login.html", {"error": None})
 
 
 @app.post("/login")
@@ -238,10 +352,10 @@ def login_submit(request: Request, password: str = Form(...)) -> Any:
     if secrets.compare_digest(password, DASHBOARD_PASSWORD):
         request.session["auth"] = True
         return RedirectResponse("/", status_code=303)
-    return templates.TemplateResponse(
+    return render(
         request,
         "login.html",
-        {"error": "رمز عبور اشتباه است"},
+        {"error": t_req(request, "err_bad_password")},
         status_code=401,
     )
 
@@ -258,7 +372,7 @@ def home(request: Request) -> Any:
         return RedirectResponse("/login", status_code=303)
 
     flash = pop_flash(request)
-    response = templates.TemplateResponse(
+    response = render(
         request,
         "index.html",
         {
@@ -278,20 +392,23 @@ def home(request: Request) -> Any:
 
 
 @app.post("/routes")
-def add_route(
+async def add_route(
     request: Request,
     domain: str = Form(...),
     port: str = Form(...),
     host: str = Form(""),
-    ssl: str | None = Form(None),
+    ssl_mode: str = Form("auto"),
+    cert_file: UploadFile | None = File(None),
+    key_file: UploadFile | None = File(None),
 ) -> Any:
     require_auth(request)
+    lang = get_lang(request)
     domain = domain.strip().lower()
     port = port.strip()
     host = normalize_host(host)
-    use_ssl = parse_ssl_form(ssl)
+    mode = parse_ssl_mode(ssl_mode)
 
-    err = validate_domain(domain) or validate_port(port)
+    err = validate_domain(domain, lang) or validate_port(port, lang)
     if err:
         response = RedirectResponse("/", status_code=303)
         set_flash(response, err, "err")
@@ -300,41 +417,57 @@ def add_route(
     routes = list_routes()
     if any(r["domain"] == domain for r in routes):
         response = RedirectResponse("/", status_code=303)
-        set_flash(response, "این دامنه از قبل وجود دارد", "err")
+        set_flash(response, translate(lang, "err_domain_exists"), "err")
         return response
 
-    routes.append({"domain": domain, "port": port, "host": host, "ssl": use_ssl})
-    ok, msg = apply_routes(routes)
+    if mode == "manual":
+        saved = await save_uploaded_certs(domain, cert_file, key_file)
+        if not saved and not has_manual_certs(domain):
+            response = RedirectResponse("/", status_code=303)
+            set_flash(response, translate(lang, "err_manual_certs_required"), "err")
+            return response
 
-    mode = "با SSL" if use_ssl else "بدون SSL (HTTP)"
+    routes.append({"domain": domain, "port": port, "host": host, "ssl_mode": mode})
+    ok, msg = apply_routes(routes, lang)
+
     response = RedirectResponse("/", status_code=303)
     set_flash(
         response,
-        f"دامنه {domain} اضافه شد — {mode}" if ok else msg,
+        translate(lang, "msg_route_added", domain=domain, mode=mode_label(lang, mode)) if ok else msg,
         "ok" if ok else "err",
     )
     return response
 
 
 @app.post("/routes/{domain}/update")
-def update_route(
+async def update_route(
     request: Request,
     domain: str,
     port: str = Form(...),
     host: str = Form(""),
-    ssl: str | None = Form(None),
+    ssl_mode: str = Form("auto"),
+    cert_file: UploadFile | None = File(None),
+    key_file: UploadFile | None = File(None),
 ) -> Any:
     require_auth(request)
+    lang = get_lang(request)
     domain = domain.strip().lower()
     port = port.strip()
     host = normalize_host(host)
-    use_ssl = parse_ssl_form(ssl)
+    mode = parse_ssl_mode(ssl_mode)
 
-    err = validate_port(port)
+    err = validate_port(port, lang)
     if err:
         response = RedirectResponse("/", status_code=303)
         set_flash(response, err, "err")
         return response
+
+    if mode == "manual":
+        await save_uploaded_certs(domain, cert_file, key_file)
+        if not has_manual_certs(domain):
+            response = RedirectResponse("/", status_code=303)
+            set_flash(response, translate(lang, "err_manual_certs_required"), "err")
+            return response
 
     routes = list_routes()
     found = False
@@ -342,43 +475,58 @@ def update_route(
         if r["domain"] == domain:
             r["port"] = port
             r["host"] = host
-            r["ssl"] = use_ssl
+            r["ssl_mode"] = mode
             found = True
             break
     if not found:
         response = RedirectResponse("/", status_code=303)
-        set_flash(response, "دامنه پیدا نشد", "err")
+        set_flash(response, translate(lang, "err_domain_not_found"), "err")
         return response
 
-    ok, msg = apply_routes(routes)
+    ok, msg = apply_routes(routes, lang)
     response = RedirectResponse("/", status_code=303)
-    set_flash(response, f"دامنه {domain} به‌روز شد" if ok else msg, "ok" if ok else "err")
+    set_flash(
+        response,
+        translate(lang, "msg_route_updated", domain=domain) if ok else msg,
+        "ok" if ok else "err",
+    )
     return response
 
 
 @app.post("/routes/{domain}/delete")
 def delete_route(request: Request, domain: str) -> Any:
     require_auth(request)
+    lang = get_lang(request)
     domain = domain.strip().lower()
     before = list_routes()
     routes = [r for r in before if r["domain"] != domain]
     if len(routes) == len(before):
         response = RedirectResponse("/", status_code=303)
-        set_flash(response, "دامنه پیدا نشد", "err")
+        set_flash(response, translate(lang, "err_domain_not_found"), "err")
         return response
 
-    ok, msg = apply_routes(routes)
+    ok, msg = apply_routes(routes, lang)
     response = RedirectResponse("/", status_code=303)
-    set_flash(response, f"دامنه {domain} حذف شد" if ok else msg, "ok" if ok else "err")
+    set_flash(
+        response,
+        translate(lang, "msg_route_deleted", domain=domain) if ok else msg,
+        "ok" if ok else "err",
+    )
     return response
 
 
 @app.post("/reload")
 def reload_now(request: Request) -> Any:
     require_auth(request)
+    lang = get_lang(request)
     routes = list_routes()
-    generate_caddyfile(routes)
-    ok, msg = reload_caddy()
+    try:
+        generate_caddyfile(routes, lang)
+    except ValueError as exc:
+        response = RedirectResponse("/", status_code=303)
+        set_flash(response, str(exc), "err")
+        return response
+    ok, msg = reload_caddy(lang)
     response = RedirectResponse("/", status_code=303)
     set_flash(response, msg, "ok" if ok else "err")
     return response
@@ -397,4 +545,8 @@ def api_status(request: Request) -> Any:
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_routes_file()
-    generate_caddyfile(list_routes())
+    ensure_certs_dir()
+    try:
+        generate_caddyfile(list_routes())
+    except ValueError:
+        pass

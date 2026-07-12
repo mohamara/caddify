@@ -1,0 +1,8 @@
+{
+	email admin@example.com
+}
+
+:80 {
+	respond "caddify ready — use: ./proxy add <domain> <port>" 200
+}
+

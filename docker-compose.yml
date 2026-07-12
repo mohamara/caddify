@@ -1,0 +1,41 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddify
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  dashboard:
+    build: ./dashboard
+    container_name: caddify-ui
+    restart: unless-stopped
+    ports:
+      - "${DASHBOARD_PORT:-9090}:9090"
+    environment:
+      DATA_DIR: /data
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:-changeme}
+      DASHBOARD_SECRET: ${DASHBOARD_SECRET:-change-this-secret}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+      CADDY_CONTAINER: caddify
+    volumes:
+      - ./routes.conf:/data/routes.conf
+      - ./caddy:/data/caddy
+      - ./.env:/data/.env:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - caddy
+
+volumes:
+  caddy_data:
+  caddy_config:

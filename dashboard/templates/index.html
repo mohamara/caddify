@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>داشبورد — caddify</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <div>
+        <strong>caddify</strong>
+        <span class="muted">داشبورد مدیریت</span>
+      </div>
+    </div>
+    <div class="top-meta">
+      <span class="pill {% if caddy.running %}ok{% else %}bad{% endif %}">
+        <span class="dot"></span>
+        Caddy {% if caddy.running %}فعال{% else %}خاموش{% endif %}
+      </span>
+      <form method="post" action="/logout">
+        <button type="submit" class="btn ghost">خروج</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="wrap">
+    {% if flash %}
+    <div class="flash {{ flash.kind }}" role="status">{{ flash.message }}</div>
+    {% endif %}
+
+    {% if default_password %}
+    <div class="flash warn" role="status">
+      رمز پیش‌فرض هنوز <code>changeme</code> است — در <code>.env</code> مقدار
+      <code>DASHBOARD_PASSWORD</code> را عوض کنید.
+    </div>
+    {% endif %}
+
+    <section class="hero-panel">
+      <div>
+        <h1>مسیرها</h1>
+        <p>هر دامنه یا ساب‌دامنه را به یک پورت وصل کن. برای هر کدام SSL را جداگانه روشن/خاموش کن.</p>
+      </div>
+      <dl class="stats">
+        <div>
+          <dt>تعداد مسیر</dt>
+          <dd>{{ routes|length }}</dd>
+        </div>
+        <div>
+          <dt>ایمیل ACME</dt>
+          <dd class="mono">{{ email }}</dd>
+        </div>
+      </dl>
+    </section>
+
+    <section class="panel">
+      <h2>افزودن دامنه</h2>
+      <form class="add-form" method="post" action="/routes">
+        <div class="field">
+          <label for="domain">دامنه</label>
+          <input id="domain" name="domain" type="text" required placeholder="app.example.com" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="port">پورت</label>
+          <input id="port" name="port" type="number" required min="1" max="65535" placeholder="3000" />
+        </div>
+        <div class="field">
+          <label for="host">هاست <span class="muted">(اختیاری)</span></label>
+          <input id="host" name="host" type="text" placeholder="localhost" autocomplete="off" />
+        </div>
+        <label class="check field-check">
+          <input type="checkbox" name="ssl" value="on" checked />
+          <span>SSL خودکار</span>
+        </label>
+        <button type="submit" class="btn primary grow">افزودن</button>
+      </form>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>دامنه‌های فعال</h2>
+        <form method="post" action="/reload">
+          <button type="submit" class="btn ghost">اعمال مجدد</button>
+        </form>
+      </div>
+
+      {% if routes %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>دامنه</th>
+              <th>پورت</th>
+              <th>هاست</th>
+              <th>SSL</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for r in routes %}
+            <tr>
+              <td>
+                <a class="mono domain" href="{% if r.ssl %}https{% else %}http{% endif %}://{{ r.domain }}" target="_blank" rel="noopener">{{ r.domain }}</a>
+              </td>
+              <td class="mono">{{ r.port }}</td>
+              <td class="mono muted">
+                {% if r.host == 'host.docker.internal' %}localhost{% else %}{{ r.host }}{% endif %}
+              </td>
+              <td>
+                {% if r.ssl %}
+                <span class="tag ok">روشن</span>
+                {% else %}
+                <span class="tag off">خاموش</span>
+                {% endif %}
+              </td>
+              <td class="actions">
+                <details class="edit">
+                  <summary class="btn ghost sm">ویرایش</summary>
+                  <form class="edit-form" method="post" action="/routes/{{ r.domain }}/update">
+                    <input name="port" type="number" required min="1" max="65535" value="{{ r.port }}" aria-label="پورت" />
+                    <input name="host" type="text" value="{% if r.host != 'host.docker.internal' %}{{ r.host }}{% endif %}" placeholder="localhost" aria-label="هاست" />
+                    <label class="check">
+                      <input type="checkbox" name="ssl" value="on" {% if r.ssl %}checked{% endif %} />
+                      <span>SSL</span>
+                    </label>
+                    <button type="submit" class="btn primary sm">ذخیره</button>
+                  </form>
+                </details>
+                <form method="post" action="/routes/{{ r.domain }}/delete" onsubmit="return confirm('حذف {{ r.domain }}؟')">
+                  <button type="submit" class="btn danger sm">حذف</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty">
+        <p>هنوز دامنه‌ای نیست.</p>
+        <p class="muted">اول DNS را به IP سرور بده، بعد از فرم بالا اضافه کن.</p>
+      </div>
+      {% endif %}
+    </section>
+  </main>
+
+  <footer class="foot">
+    <span>پورت داشبورد: <code>9090</code></span>
+    <span>CLI: <code>./proxy help</code></span>
+  </footer>
+</body>
+</html>

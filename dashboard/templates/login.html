@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ورود — caddify</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <div class="auth-brand">
+      <span class="mark" aria-hidden="true"></span>
+      <h1>caddify</h1>
+      <p>مدیریت دامنه، پورت و SSL</p>
+    </div>
+
+    <form class="auth-form" method="post" action="/login" autocomplete="current-password">
+      <label for="password">رمز داشبورد</label>
+      <input id="password" name="password" type="password" required autofocus placeholder="••••••••" />
+      {% if error %}
+      <p class="flash err" role="alert">{{ error }}</p>
+      {% endif %}
+      <button type="submit" class="btn primary">ورود</button>
+    </form>
+  </main>
+</body>
+</html>

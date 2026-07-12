@@ -1,0 +1,508 @@
+#!/usr/bin/env bash
+# caddify CLI — setup, add/remove domains, SSL reverse proxy
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+ROUTES="$ROOT/routes.conf"
+COMPOSE_FILE="$ROOT/docker-compose.yml"
+CADDYFILE="$ROOT/caddy/Caddyfile"
+ENV_FILE="$ROOT/.env"
+ENV_EXAMPLE="$ROOT/.env.example"
+DEFAULT_HOST="host.docker.internal"
+
+# ── helpers ──────────────────────────────────────────────────────────
+
+die() { echo "error: $*" >&2; exit 1; }
+info() { echo "$*"; }
+
+need_docker() {
+  command -v docker >/dev/null 2>&1 || die "docker not found — install Docker first"
+  docker compose version >/dev/null 2>&1 || die "docker compose not found"
+}
+
+load_env() {
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+  ACME_EMAIL="${ACME_EMAIL:-admin@example.com}"
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+ensure_routes_file() {
+  if [[ ! -f "$ROUTES" ]]; then
+    cat >"$ROUTES" <<'EOF'
+# domain  port  [host]  [ssl|nossl]
+# example: app.example.com  3000
+# example: local.test       8080  nossl
+EOF
+  fi
+}
+
+caddy_running() {
+  docker compose -f "$COMPOSE_FILE" ps --status running 2>/dev/null | grep -qE 'caddy|caddify'
+}
+
+is_ssl_off_token() {
+  case "${1,,}" in
+    nossl|http|no-ssl|ssl=false|ssl=0|false) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_ssl_on_token() {
+  case "${1,,}" in
+    ssl|https|ssl=true|ssl=1|true) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Write one route line: domain port [host] [nossl]
+format_route_line() {
+  local domain="$1" port="$2" host="$3" ssl="$4"
+  if [[ "$host" == "$DEFAULT_HOST" ]]; then
+    if [[ "$ssl" == "1" ]]; then
+      printf '%s  %s\n' "$domain" "$port"
+    else
+      printf '%s  %s  nossl\n' "$domain" "$port"
+    fi
+  else
+    if [[ "$ssl" == "1" ]]; then
+      printf '%s  %s  %s\n' "$domain" "$port" "$host"
+    else
+      printf '%s  %s  %s  nossl\n' "$domain" "$port" "$host"
+    fi
+  fi
+}
+
+# Parse active routes into DOMAIN|PORT|HOST|SSL (SSL=1|0)
+list_routes_raw() {
+  ensure_routes_file
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    local line domain port host ssl=1 token
+    line="${raw%%#*}"
+    line="$(trim "$line")"
+    [[ -z "$line" ]] && continue
+    # shellcheck disable=SC2086
+    set -- $line
+    domain="${1:-}"
+    port="${2:-}"
+    host="$DEFAULT_HOST"
+    ssl=1
+    [[ -z "$domain" || -z "$port" ]] && continue
+    shift 2 || true
+    for token in "$@"; do
+      if is_ssl_off_token "$token"; then
+        ssl=0
+      elif is_ssl_on_token "$token"; then
+        ssl=1
+      else
+        host="$token"
+      fi
+    done
+    printf '%s|%s|%s|%s\n' "$domain" "$port" "$host" "$ssl"
+  done <"$ROUTES"
+}
+
+domain_exists() {
+  list_routes_raw | awk -F'|' -v d="$1" '
+    $1 == d { found = 1 }
+    END { exit !found }
+  '
+}
+
+validate_domain() {
+  local d="$1"
+  [[ "$d" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]] || die "invalid domain: $d"
+}
+
+validate_port() {
+  local p="$1"
+  [[ "$p" =~ ^[0-9]+$ ]] || die "invalid port: $p"
+  (( p >= 1 && p <= 65535 )) || die "port out of range: $p"
+}
+
+# Parse args after command: domain port [host] [--no-ssl|--ssl]
+# Sets: PARSE_DOMAIN PARSE_PORT PARSE_HOST PARSE_SSL PARSE_HOST_SET
+parse_route_args() {
+  PARSE_DOMAIN=""
+  PARSE_PORT=""
+  PARSE_HOST="$DEFAULT_HOST"
+  PARSE_SSL=1
+  PARSE_HOST_SET=0
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --no-ssl|nossl)
+        PARSE_SSL=0
+        shift
+        ;;
+      --ssl|ssl)
+        PARSE_SSL=1
+        shift
+        ;;
+      -*)
+        die "unknown flag: $1"
+        ;;
+      *)
+        if [[ -z "$PARSE_DOMAIN" ]]; then
+          PARSE_DOMAIN="$1"
+        elif [[ -z "$PARSE_PORT" ]]; then
+          PARSE_PORT="$1"
+        else
+          PARSE_HOST="$1"
+          PARSE_HOST_SET=1
+        fi
+        shift
+        ;;
+    esac
+  done
+}
+
+# ── core: generate + reload ──────────────────────────────────────────
+
+cmd_apply() {
+  load_env
+  ensure_routes_file
+  mkdir -p "$ROOT/caddy"
+
+  local count=0
+  {
+    printf '%s\n' '{'
+    printf '\temail %s\n' "$ACME_EMAIL"
+    printf '%s\n\n' '}'
+
+    while IFS='|' read -r domain port host ssl; do
+      [[ -z "${domain:-}" ]] && continue
+      if [[ "$ssl" == "1" ]]; then
+        printf '%s {\n' "$domain"
+      else
+        printf 'http://%s {\n' "$domain"
+      fi
+      printf '\treverse_proxy %s:%s\n' "$host" "$port"
+      printf '}\n\n'
+      count=$((count + 1))
+    done < <(list_routes_raw)
+
+    if [[ "$count" -eq 0 ]]; then
+      printf '%s\n' ':80 {'
+      printf '\trespond "caddify ready — use: ./proxy add <domain> <port>" 200\n'
+      printf '}\n\n'
+    fi
+  } >"$CADDYFILE"
+
+  info "Caddyfile updated ($count route(s))"
+
+  if caddy_running; then
+    docker compose -f "$COMPOSE_FILE" exec -T caddy \
+      caddy reload --config /etc/caddy/Caddyfile
+    info "reloaded"
+  fi
+}
+
+# ── commands ─────────────────────────────────────────────────────────
+
+cmd_setup() {
+  need_docker
+  local email="${1:-}"
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+  fi
+
+  if [[ -n "$email" ]]; then
+    if grep -q '^ACME_EMAIL=' "$ENV_FILE"; then
+      sed -i "s|^ACME_EMAIL=.*|ACME_EMAIL=$email|" "$ENV_FILE"
+    else
+      echo "ACME_EMAIL=$email" >>"$ENV_FILE"
+    fi
+    info "ACME_EMAIL=$email"
+  else
+    load_env
+    if [[ "$ACME_EMAIL" == "admin@example.com" ]]; then
+      echo
+      read -r -p "Let's Encrypt email: " email
+      [[ -n "$email" ]] || die "email required"
+      sed -i "s|^ACME_EMAIL=.*|ACME_EMAIL=$email|" "$ENV_FILE"
+      info "ACME_EMAIL=$email"
+    fi
+  fi
+
+  ensure_routes_file
+  cmd_apply
+  docker compose -f "$COMPOSE_FILE" up -d --build
+  load_env
+  local dash_port="${DASHBOARD_PORT:-9090}"
+  echo
+  info "✓ proxy is up on :80 / :443"
+  info "✓ dashboard: http://SERVER_IP:${dash_port}  (password in .env)"
+  echo
+  info "next:"
+  info "  1) change DASHBOARD_PASSWORD in .env"
+  info "  2) point domain DNS to this server"
+  info "  3) add routes in the dashboard or: ./proxy add app.example.com 3000"
+}
+
+cmd_up() {
+  need_docker
+  [[ -f "$ENV_FILE" ]] || die "not set up — run: ./proxy setup"
+  cmd_apply
+  docker compose -f "$COMPOSE_FILE" up -d --build
+  info "started"
+  load_env
+  info "dashboard: http://127.0.0.1:${DASHBOARD_PORT:-9090}"
+}
+
+cmd_down() {
+  need_docker
+  docker compose -f "$COMPOSE_FILE" down
+  info "stopped"
+}
+
+cmd_restart() {
+  need_docker
+  docker compose -f "$COMPOSE_FILE" restart
+  info "restarted"
+}
+
+cmd_add() {
+  parse_route_args "$@"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" ssl="$PARSE_SSL"
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy add <domain> <port> [host] [--no-ssl|--ssl]"
+
+  validate_domain "$domain"
+  validate_port "$port"
+  ensure_routes_file
+
+  if domain_exists "$domain"; then
+    die "domain already exists: $domain (use: ./proxy set $domain $port)"
+  fi
+
+  format_route_line "$domain" "$port" "$host" "$ssl" >>"$ROUTES"
+
+  if [[ "$ssl" == "1" ]]; then
+    info "added $domain → ${host}:${port} (SSL on)"
+  else
+    info "added $domain → ${host}:${port} (SSL off / HTTP only)"
+  fi
+  cmd_apply
+}
+
+cmd_set() {
+  parse_route_args "$@"
+  local domain="$PARSE_DOMAIN" port="$PARSE_PORT" host="$PARSE_HOST" ssl="$PARSE_SSL"
+  local host_set="$PARSE_HOST_SET"
+  local ssl_set=0
+
+  # detect if ssl flag was explicitly passed
+  for a in "$@"; do
+    case "$a" in
+      --no-ssl|nossl|--ssl|ssl) ssl_set=1 ;;
+    esac
+  done
+
+  [[ -n "$domain" && -n "$port" ]] || die "usage: ./proxy set <domain> <port> [host] [--no-ssl|--ssl]"
+
+  validate_domain "$domain"
+  validate_port "$port"
+  domain_exists "$domain" || die "domain not found: $domain"
+
+  local cur_host cur_ssl
+  cur_host="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $3 }')"
+  cur_ssl="$(list_routes_raw | awk -F'|' -v d="$domain" '$1 == d { print $4 }')"
+  cur_host="${cur_host:-$DEFAULT_HOST}"
+  cur_ssl="${cur_ssl:-1}"
+
+  [[ "$host_set" == "1" ]] || host="$cur_host"
+  [[ "$ssl_set" == "1" ]] || ssl="$cur_ssl"
+
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    local line d
+    line="${raw%%#*}"
+    line="$(trim "$line")"
+    if [[ -n "$line" ]]; then
+      # shellcheck disable=SC2086
+      set -- $line
+      d="${1:-}"
+      if [[ "$d" == "$domain" ]]; then
+        format_route_line "$domain" "$port" "$host" "$ssl"
+        continue
+      fi
+    fi
+    printf '%s\n' "$raw"
+  done <"$ROUTES" >"$tmp"
+  mv "$tmp" "$ROUTES"
+
+  if [[ "$ssl" == "1" ]]; then
+    info "updated $domain → ${host}:${port} (SSL on)"
+  else
+    info "updated $domain → ${host}:${port} (SSL off)"
+  fi
+  cmd_apply
+}
+
+cmd_rm() {
+  local domain="${1:-}"
+  [[ -n "$domain" ]] || die "usage: ./proxy rm <domain>"
+
+  domain_exists "$domain" || die "domain not found: $domain"
+
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r raw || [[ -n "$raw" ]]; do
+    local line d
+    line="${raw%%#*}"
+    line="$(trim "$line")"
+    if [[ -n "$line" ]]; then
+      # shellcheck disable=SC2086
+      set -- $line
+      d="${1:-}"
+      [[ "$d" == "$domain" ]] && continue
+    fi
+    printf '%s\n' "$raw"
+  done <"$ROUTES" >"$tmp"
+  mv "$tmp" "$ROUTES"
+
+  info "removed $domain"
+  cmd_apply
+}
+
+cmd_list() {
+  ensure_routes_file
+  local n=0
+  printf '%-32s %-8s %-16s %s\n' "DOMAIN" "PORT" "HOST" "SSL"
+  printf '%-32s %-8s %-16s %s\n' "------" "----" "----" "---"
+  while IFS='|' read -r domain port host ssl; do
+    [[ -z "${domain:-}" ]] && continue
+    local show_host="$host" show_ssl="on"
+    [[ "$host" == "$DEFAULT_HOST" ]] && show_host="localhost"
+    [[ "$ssl" == "1" ]] || show_ssl="off"
+    printf '%-32s %-8s %-16s %s\n' "$domain" "$port" "$show_host" "$show_ssl"
+    n=$((n + 1))
+  done < <(list_routes_raw)
+
+  if [[ "$n" -eq 0 ]]; then
+    echo "(no routes — ./proxy add <domain> <port>)"
+  else
+    echo
+    info "$n route(s)"
+  fi
+}
+
+cmd_status() {
+  need_docker
+  echo "=== container ==="
+  if [[ -f "$ENV_FILE" ]]; then
+    docker compose -f "$COMPOSE_FILE" ps
+  else
+    echo "not set up — run: ./proxy setup"
+    return
+  fi
+  echo
+  echo "=== routes ==="
+  cmd_list
+  echo
+  load_env
+  echo "=== config ==="
+  echo "email:      $ACME_EMAIL"
+  echo "dashboard:  http://127.0.0.1:${DASHBOARD_PORT:-9090}"
+  echo "root:       $ROOT"
+}
+
+cmd_logs() {
+  need_docker
+  docker compose -f "$COMPOSE_FILE" logs -f --tail=100 caddy
+}
+
+cmd_email() {
+  local email="${1:-}"
+  [[ -n "$email" ]] || die "usage: ./proxy email <address>"
+  [[ -f "$ENV_FILE" ]] || cp "$ENV_EXAMPLE" "$ENV_FILE"
+  if grep -q '^ACME_EMAIL=' "$ENV_FILE"; then
+    sed -i "s|^ACME_EMAIL=.*|ACME_EMAIL=$email|" "$ENV_FILE"
+  else
+    echo "ACME_EMAIL=$email" >>"$ENV_FILE"
+  fi
+  info "ACME_EMAIL=$email"
+  if caddy_running; then
+    cmd_apply
+    docker compose -f "$COMPOSE_FILE" up -d
+  fi
+}
+
+cmd_help() {
+  cat <<'EOF'
+caddify — دامنه → پورت با SSL انتخابی
+
+Usage:
+  ./proxy setup [email]          نصب و روشن کردن پراکسی + داشبورد
+  ./proxy add <domain> <port> [host] [--ssl|--no-ssl]
+  ./proxy set <domain> <port> [host] [--ssl|--no-ssl]
+  ./proxy rm  <domain>           حذف دامنه
+  ./proxy list                   لیست دامنه‌ها
+  ./proxy status                 وضعیت سرویس + مسیرها
+  ./proxy logs                   لاگ زنده Caddy
+  ./proxy apply                  بازسازی کانفیگ و ریلود
+  ./proxy up | down | restart    کنترل کانتینر
+  ./proxy email <address>        ایمیل Let's Encrypt
+  ./proxy help                   همین راهنما
+
+SSL:
+  --ssl      گواهی خودکار Let's Encrypt (پیش‌فرض)
+  --no-ssl   فقط HTTP — بدون گواهی
+
+Dashboard:
+  http://SERVER_IP:9090
+  رمز: DASHBOARD_PASSWORD در فایل .env
+
+Examples:
+  ./proxy add app.example.com 3000
+  ./proxy add api.example.com 8080 --ssl
+  ./proxy add local.test 9000 --no-ssl
+  ./proxy add other.com 9000 10.0.0.5 --no-ssl
+  ./proxy set app.example.com 3001 --no-ssl
+  ./proxy rm  api.example.com
+
+Notes:
+  • برای SSL: DNS دامنه باید به IP این سرور اشاره کند
+  • پورت‌های 80 و 443 باید باز باشند
+EOF
+}
+
+# ── dispatch ─────────────────────────────────────────────────────────
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    setup|init)   cmd_setup "$@" ;;
+    up|start)     cmd_up "$@" ;;
+    down|stop)    cmd_down "$@" ;;
+    restart)      cmd_restart "$@" ;;
+    add)          cmd_add "$@" ;;
+    set|update)   cmd_set "$@" ;;
+    rm|remove|del|delete) cmd_rm "$@" ;;
+    list|ls)      cmd_list "$@" ;;
+    status|ps)    cmd_status "$@" ;;
+    logs|log)     cmd_logs "$@" ;;
+    apply|reload) cmd_apply "$@" ;;
+    email)        cmd_email "$@" ;;
+    help|-h|--help) cmd_help ;;
+    *)
+      die "unknown command: $cmd — try: ./proxy help"
+      ;;
+  esac
+}
+
+main "$@"
